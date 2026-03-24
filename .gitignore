@@ -1,0 +1,22 @@
+# Java
+target/
+*.class
+
+# Logs
+*.log
+
+# Env
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Docker
+*.tar
+
+# Node (if any frontend)
+node_modules/
