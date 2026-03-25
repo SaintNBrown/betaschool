@@ -49,7 +49,7 @@ public class SecurityConfig {
 
                         // ── School Admin manages their school ────────────────────
                         .requestMatchers("/admin/schools/{schoolId}").hasAnyRole("SYSTEM_ADMIN", "SCHOOL_ADMIN")
-                        .requestMatchers("/admin/schools/{schoolId}/users").hasAnyRole(HttpMethod.GET, "SYSTEM_ADMIN", "SCHOOL_ADMIN")
+                        .requestMatchers(HttpMethod.GET, "/admin/schools/{schoolId}/users").hasAnyRole( "SYSTEM_ADMIN", "SCHOOL_ADMIN")
 
                         // ── System Admin only ────────────────────────────────────
                         .requestMatchers("/admin/**").hasRole("SYSTEM_ADMIN")
