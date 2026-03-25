@@ -3,7 +3,7 @@ spring:
     name: betaschool-backend
 
   datasource:
-    url: jdbc:postgresql://localhost:5432/betaschool
+    url: ${${DATABASE_URL}:jdbc:postgresql://localhost:5432/betaschool}
     username: ${DB_USERNAME:betaschool}
     password: ${DB_PASSWORD:betaschool}
     hikari:
@@ -43,7 +43,8 @@ spring:
       time-to-live: 600000  # 10 minutes
 
 server:
-  port: 8080
+  port: ${PORT:8080}
+  address: 0.0.0.0
   servlet:
     context-path: /api/v1
 

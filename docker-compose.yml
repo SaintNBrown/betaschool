@@ -41,7 +41,7 @@ services:
       redis:
         condition: service_healthy
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/betaschool
+      SPRING_DATASOURCE_URL: ${DATABASE_URL:jdbc:postgresql://postgres:5432/betaschool}
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
       REDIS_HOST: ${REDIS_HOST}
