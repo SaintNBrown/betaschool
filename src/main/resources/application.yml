@@ -3,7 +3,7 @@ spring:
     name: betaschool-backend
 
   datasource:
-    url: ${${DATABASE_URL}:jdbc:postgresql://localhost:5432/betaschool}
+    url: ${JDBC_DATABASE_URL:jdbc:postgresql://localhost:5432/betaschool}
     username: ${DB_USERNAME:betaschool}
     password: ${DB_PASSWORD:betaschool}
     hikari:
@@ -32,9 +32,7 @@ spring:
 
   data:
     redis:
-      host: ${REDIS_HOST:localhost}
-      port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
+      url: ${REDIS_URL:redis://localhost:6379}
       timeout: 2000ms
 
   cache:
@@ -42,35 +40,6 @@ spring:
     redis:
       time-to-live: 600000  # 10 minutes
 
-server:
-  port: ${PORT:8080}
-  address: 0.0.0.0
-  servlet:
-    context-path: /api/v1
-
-security:
-  jwt:
-    secret: ${JWT_SECRET:betaschool-super-secret-key-change-in-production-minimum-256-bits}
-    expiration: 86400000   # 24 hours
-    refresh-expiration: 604800000  # 7 days
-
-springdoc:
-  api-docs:
-    path: /api-docs
-  swagger-ui:
-    path: /swagger-ui.html
-    tags-sorter: alpha
-
-logging:
-  level:
-    com.betaschool: DEBUG
-    org.springframework.security: DEBUG
-
-
-cors:
-  # Comma-separated list of allowed origins.
-  # Override in production: CORS_ALLOWED_ORIGINS=https://yourapp.com
-  allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173,http://localhost:4173}
 
   mail:
     host: ${MAIL_HOST:smtp.gmail.com}
@@ -87,6 +56,35 @@ cors:
           connectiontimeout: 5000
           timeout: 5000
           writetimeout: 5000
+
+server:
+  port: ${PORT:8080}
+  address: 0.0.0.0
+  servlet:
+    context-path: /api/v1
+
+security:
+  jwt:
+    secret: ${JWT_SECRET}
+    expiration: 86400000   # 24 hours
+    refresh-expiration: 604800000  # 7 days
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    tags-sorter: alpha
+
+logging:
+  level:
+    com.betaschool: ${LOG_LEVEL:DEBUG}
+    org.springframework.security: ${LOG_LEVEL_SECURITY:DEBUG}
+
+cors:
+  # Comma-separated list of allowed origins.
+  # Override in production: CORS_ALLOWED_ORIGINS=https://yourapp.com
+  allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173,http://localhost:4173}
 
 app:
   mail:
