@@ -26,7 +26,7 @@ spring:
         order_updates: true
 
   flyway:
-    enabled: true
+    enabled: ${FLYWAY_ENABLED:false}
     locations: classpath:db/migration
     baseline-on-migrate: true
     url: ${FLYWAY_DATABASE_URL}
@@ -61,7 +61,7 @@ spring:
           writetimeout: 5000
 
 server:
-  port: ${PORT:8080}
+  port: ${PORT}
   address: 0.0.0.0
   servlet:
     context-path: /api/v1
