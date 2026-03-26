@@ -33,8 +33,8 @@ COPY --from=build /app/target/app.jar app.jar
 
 USER betaschool
 
-EXPOSE 8080
-
 ENV JAVA_OPTS="-Xms256m -Xmx512m"
+
+EXPOSE 8080
 
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar app.jar"]
