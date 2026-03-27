@@ -61,7 +61,7 @@ spring:
           writetimeout: 10000
 
 server:
-  port: ${PORT}
+  port: ${PORT:10000}
   address: 0.0.0.0
   servlet:
     context-path: /api/v1
