@@ -23,9 +23,6 @@ spring:
     show-sql: false
     properties:
       hibernate:
-        query:
-          plan_cache_max_size: 0    # disable Hibernate's own query plan cache to match
-        dialect: org.hibernate.dialect.PostgreSQLDialect
         format_sql: true
         default_schema: public
         jdbc:
