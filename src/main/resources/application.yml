@@ -10,6 +10,12 @@ spring:
       maximum-pool-size: 20
       minimum-idle: 5
       connection-timeout: 30000
+      data-source-properties:
+        prepareThreshold: 0       # don't cache prepared statements server-side at all
+        preferQueryMode: simple   # use PostgreSQL's simple query protocol instead of extended
+      connection-init-sql: "SELECT 1"
+      connection-test-query: "SELECT 1"   # validate connection before handing to app
+      keepalive-time: 30000 # keepalive every 30s to prevent idle timeout
 
   jpa:
     hibernate:
@@ -17,6 +23,8 @@ spring:
     show-sql: false
     properties:
       hibernate:
+        query:
+          plan_cache_max_size: 0    # disable Hibernate's own query plan cache to match
         dialect: org.hibernate.dialect.PostgreSQLDialect
         format_sql: true
         default_schema: public
@@ -98,9 +106,9 @@ app:
     from-name: ${MAIL_FROM_NAME:BetaSchool}
     # Base URL used in reset links — override in production
     frontend-base-url: ${FRONTEND_BASE_URL:http://localhost:5173}
-    password-reset:
-      # How long a reset token is valid (minutes)
-      token-expiry-minutes: ${PASSWORD_RESET_EXPIRY_MINUTES:30}
+  password-reset:
+    # How long a reset token is valid (minutes)
+    token-expiry-minutes: ${PASSWORD_RESET_EXPIRY_MINUTES:30}
 
 # ── Actuator ──────────────────────────────────────────────────────────────────
 management:
