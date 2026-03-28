@@ -45,6 +45,19 @@ public class SchoolScoreConfigEntity {
     private Integer examWeight = 60;
 
     /**
+     * Controls what the report card shows alongside the student's average:
+     *
+     *  TRUE  (default) → show class position (rank) + average score.
+     *                    Suitable for competitive environments.
+     *  FALSE           → show term average percentage + a term grade derived
+     *                    from the school's grading bands. No rank is shown.
+     *                    Suitable for holistic / non-competitive environments.
+     */
+    @Column(name = "show_student_position", nullable = false)
+    @Builder.Default
+    private boolean showStudentPosition = true;
+
+    /**
      * Ordered list of grading bands stored as JSONB in Postgres.
      * Each band: { "grade": "A", "minScore": 70, "maxScore": 100 }
      * Bands must be contiguous and cover 0–100; enforced at application layer.

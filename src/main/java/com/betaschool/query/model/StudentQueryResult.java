@@ -36,8 +36,10 @@ public sealed interface StudentQueryResult {
             Integer termNumber,
             List<ReportCardEntry> entries,
             BigDecimal totalScore,
-            BigDecimal averageScore,
-            Integer position
+            BigDecimal averageScore,        // average of subject combined scores for this term
+            Integer position,               // class rank (null when showPosition = false)
+            String termGrade,               // grade derived from averageScore % vs school grading bands
+            boolean showPosition            // true → show position; false → show termGrade only
     ) implements StudentQueryResult {}
 
     record ReportCardEntry(

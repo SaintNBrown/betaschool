@@ -47,7 +47,8 @@ public class SchoolConfigQueryHandlers {
                     config.getCaWeight(),
                     config.getExamWeight(),
                     config.getCaWeight() + ":" + config.getExamWeight(),
-                    bandViews);
+                    bandViews,
+                    config.isShowStudentPosition());
         }
     }
 }

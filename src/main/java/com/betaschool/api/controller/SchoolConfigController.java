@@ -2,6 +2,7 @@ package com.betaschool.api.controller;
 
 import com.betaschool.api.dto.response.ApiResponse;
 import com.betaschool.command.model.SchoolConfigCommand.SetGradingScaleCommand;
+import com.betaschool.command.model.SchoolConfigCommand.SetReportCardDisplayCommand;
 import com.betaschool.command.model.SchoolConfigCommand.SetScoreRatioCommand;
 import com.betaschool.query.model.SchoolConfigQuery.GetSchoolScoreConfigQuery;
 import com.betaschool.query.model.SchoolConfigQueryResult.SchoolScoreConfig;
@@ -30,7 +31,7 @@ public class SchoolConfigController {
     // ── GET current config ────────────────────────────────────────────────
 
     @GetMapping("/score")
-    @PreAuthorize("hasAnyRole('SCHOOL_ADMIN','TEACHER','STUDENT')")
+    @PreAuthorize("hasAnyRole('SCHOOL_ADMIN','SYSTEM_ADMIN','TEACHER','STUDENT')")
     @Operation(summary = "Get this school's current score ratio and grading scale")
     public ResponseEntity<ApiResponse<SchoolScoreConfig>> getConfig() {
         return ResponseEntity.ok(ApiResponse.ok(queryBus.dispatch(new GetSchoolScoreConfigQuery())));
@@ -39,7 +40,7 @@ public class SchoolConfigController {
     // ── Set CA : Exam ratio ───────────────────────────────────────────────
 
     @PutMapping("/score/ratio")
-    @PreAuthorize("hasAnyRole('SCHOOL_ADMIN')")
+    @PreAuthorize("hasAnyRole('SCHOOL_ADMIN','SYSTEM_ADMIN')")
     @Operation(summary = "[SCHOOL_ADMIN] Set the CA-to-exam score ratio",
                description = "caWeight + examWeight must equal 100. " +
                              "Example: { \"caWeight\": 40, \"examWeight\": 60 } → 40:60 split. " +
@@ -54,7 +55,7 @@ public class SchoolConfigController {
     // ── Set grading scale ─────────────────────────────────────────────────
 
     @PutMapping("/score/grading")
-    @PreAuthorize("hasAnyRole('SCHOOL_ADMIN')")
+    @PreAuthorize("hasAnyRole('SCHOOL_ADMIN','SYSTEM_ADMIN')")
     @Operation(summary = "[SCHOOL_ADMIN] Replace the school's grading scale",
                description = """
                        Replaces all grading bands for this school.
@@ -84,6 +85,38 @@ public class SchoolConfigController {
         return ResponseEntity.ok(ApiResponse.noContent("Grading scale updated with " + bands.size() + " bands"));
     }
 
+    // ── Set report card display preference ────────────────────────────────
+
+    @PutMapping("/score/display")
+    @PreAuthorize("hasAnyRole('SCHOOL_ADMIN','SYSTEM_ADMIN')")
+    @Operation(summary = "[SCHOOL_ADMIN] Set what the report card shows alongside a student's average",
+               description = """
+                       Controls the summary section of the report card:
+
+                       showStudentPosition = true  (default)
+                           → Displays the student's class rank (position) AND average score.
+                             e.g. "Position: 3rd | Average: 78.50"
+                             Suitable for competitive grading environments.
+
+                       showStudentPosition = false
+                           → Displays the student's term average percentage AND a term grade
+                             derived from the school's grading bands. No rank is shown.
+                             e.g. "Average: 78.50% | Term Grade: B"
+                             Suitable for holistic / non-competitive environments
+                             (common in primary schools).
+
+                       The term grade is computed by passing the student's average score
+                       through the school's configured grading bands. For example, if the
+                       average is 98% and the school's A-band is 75–100, the term grade is A.
+                       """)
+    public ResponseEntity<ApiResponse<Void>> setReportCardDisplay(
+            @Valid @RequestBody SetDisplayRequest req) {
+        commandBus.dispatch(new SetReportCardDisplayCommand(req.showStudentPosition()));
+        return ResponseEntity.ok(ApiResponse.noContent(
+                "Report card display updated: " +
+                (req.showStudentPosition() ? "showing class position" : "showing term grade")));
+    }
+
     // ── Request records ───────────────────────────────────────────────────
 
     public record SetRatioRequest(
@@ -100,4 +133,8 @@ public class SchoolConfigController {
                 @NotNull @Min(0) @Max(100) Integer maxScore
         ) {}
     }
+
+    public record SetDisplayRequest(
+            @NotNull Boolean showStudentPosition
+    ) {}
 }

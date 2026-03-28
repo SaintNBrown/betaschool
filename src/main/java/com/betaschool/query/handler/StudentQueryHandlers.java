@@ -1,7 +1,6 @@
 package com.betaschool.query.handler;
 
 import com.betaschool.infrastructure.persistence.entity.*;
-import com.betaschool.infrastructure.persistence.entity.SchoolScoreConfigEntity;
 import com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity;
 import com.betaschool.infrastructure.persistence.repository.*;
 import com.betaschool.query.model.StudentQuery.*;
@@ -241,14 +240,26 @@ public class StudentQueryHandlers {
             BigDecimal average = scoredEntries.isEmpty() ? BigDecimal.ZERO
                     : total.divide(BigDecimal.valueOf(scoredEntries.size()), 2, RoundingMode.HALF_UP);
 
+            // Term grade: resolve the student's average score (already out of 100
+            // because each subject's combined score sums to 100) against the
+            // school's grading bands. e.g. average 98% → "A".
+            String termGrade = config.resolveGrade(average.intValue());
+
             Long classSessionId = term.getClassSession().getId();
-            Integer position = computePosition(query.studentId(), classSessionId, query.termId(), schoolId, total);
+            boolean showPosition = config.isShowStudentPosition();
+
+            // Only compute the class position when the school has opted to show it.
+            // Skip the extra DB query when showPosition = false.
+            Integer position = showPosition
+                    ? computePosition(query.studentId(), classSessionId, query.termId(), schoolId, total)
+                    : null;
 
             return new ReportCard(student.getId(),
                     student.getSurname() + " " + student.getOtherNames(),
                     term.getClassSession().getClazz().getName(),
                     term.getSession().getSessionName(),
-                    term.getTermNumber(), entries, total, average, position);
+                    term.getTermNumber(), entries, total, average,
+                    position, termGrade, showPosition);
         }
 
         private Integer computePosition(Long studentId, Long classSessionId, Long termId,
@@ -286,6 +297,8 @@ public class StudentQueryHandlers {
         private final TenantGuard tenantGuard;
 
         @Override
+        @Cacheable(value = "transcripts",
+                key = "#query.studentId() + '-' + #query.sessionId() + '-' + T(com.betaschool.tenant.context.TenantContext).getSchoolId()")
         public FullTranscript handle(GetStudentFullTranscriptQuery query) {
             Long schoolId = tenantGuard.requireSchoolId();
             if (TenantContext.isStudent()) {

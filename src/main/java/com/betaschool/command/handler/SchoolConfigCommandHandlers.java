@@ -1,6 +1,7 @@
 package com.betaschool.command.handler;
 
 import com.betaschool.command.model.SchoolConfigCommand.SetGradingScaleCommand;
+import com.betaschool.command.model.SchoolConfigCommand.SetReportCardDisplayCommand;
 import com.betaschool.command.model.SchoolConfigCommand.SetScoreRatioCommand;
 import com.betaschool.infrastructure.persistence.entity.SchoolScoreConfigEntity;
 import com.betaschool.infrastructure.persistence.entity.SchoolScoreConfigEntity.GradingBand;
@@ -117,6 +118,28 @@ public class SchoolConfigCommandHandlers {
             SchoolScoreConfigEntity config = configRepo.findBySchoolId(schoolId)
                     .orElseGet(() -> SchoolScoreConfigEntity.builder().schoolId(schoolId).build());
             config.setGradingBands(entities);
+            configRepo.save(config);
+            return null;
+        }
+    }
+
+    // ── Set report card display preference ────────────────────────────────
+
+    @Component
+    @RequiredArgsConstructor
+    @Transactional
+    public static class SetReportCardDisplayHandler
+            implements CommandHandler<SetReportCardDisplayCommand, Void> {
+
+        private final JpaSchoolScoreConfigRepository configRepo;
+
+        @Override
+        public Void handle(SetReportCardDisplayCommand cmd) {
+            Long schoolId = SchoolIdInjector.require();
+
+            SchoolScoreConfigEntity config = configRepo.findBySchoolId(schoolId)
+                    .orElseGet(() -> SchoolScoreConfigEntity.builder().schoolId(schoolId).build());
+            config.setShowStudentPosition(cmd.showStudentPosition());
             configRepo.save(config);
             return null;
         }

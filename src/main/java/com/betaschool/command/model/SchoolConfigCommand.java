@@ -1,8 +1,8 @@
 package com.betaschool.command.model;
 
 import com.betaschool.shared.Command;
-import jakarta.validation.constraints.*;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.*;
 
 import java.util.List;
 
@@ -36,4 +36,14 @@ public sealed interface SchoolConfigCommand {
                 @NotNull @Min(0) @Max(100) Integer maxScore
         ) {}
     }
+
+    /**
+     * Toggle what the report card shows alongside a student's average score.
+     *
+     * showStudentPosition = true  → display class position (rank) + average.
+     * showStudentPosition = false → display term average % + term grade only (no rank).
+     */
+    record SetReportCardDisplayCommand(
+            @NotNull Boolean showStudentPosition
+    ) implements Command<Void>, SchoolConfigCommand {}
 }

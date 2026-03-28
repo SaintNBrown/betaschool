@@ -12,8 +12,9 @@ public class SchoolConfigQueryResult {
             Long   schoolId,
             int    caWeight,
             int    examWeight,
-            String ratioLabel,          // e.g. "40:60"
-            List<GradingBandView> gradingBands
+            String ratioLabel,
+            List<GradingBandView> gradingBands,
+            boolean showStudentPosition
     ) {}
 
     public record GradingBandView(
