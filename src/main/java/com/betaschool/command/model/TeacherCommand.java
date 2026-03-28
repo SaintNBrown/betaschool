@@ -4,7 +4,10 @@ import com.betaschool.shared.Command;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 
+import java.util.List;
+
 public sealed interface TeacherCommand {
+
     record CreateTeacherCommand(
             @NotBlank String surname,
             @NotBlank String otherNames,
@@ -28,6 +31,31 @@ public sealed interface TeacherCommand {
             Long teacherId,
             Long classSubjectId
     ) implements Command<Long>, TeacherCommand {}
+
+    /**
+     * Assigns a teacher to multiple class-subjects in a single transaction.
+     *
+     * This is the secondary-school equivalent of AssignFormTeacherToAllSubjectsCommand:
+     * instead of assigning to every subject in the class, it assigns to a specific
+     * subset chosen by the admin (e.g. Mathematics, Basic Science, Basic Technology).
+     *
+     * Per-subject behaviour:
+     *  - Subject has no teacher yet           → assigned to this teacher  (ASSIGNED)
+     *  - Subject already owned by THIS teacher → left unchanged, idempotent (ALREADY_OWNED)
+     *  - Subject owned by a DIFFERENT teacher  → skipped, name returned in result (SKIPPED)
+     *    The caller must use PUT /teachers/{id}/assign/subject/{id} to explicitly reassign.
+     */
+    record BulkAssignTeacherToSubjectsCommand(
+            Long teacherId,
+            List<Long> classSubjectIds   // the specific subjects to assign
+    ) implements Command<BulkAssignmentResult>, TeacherCommand {}
+
+    record BulkAssignmentResult(
+            int assigned,
+            int alreadyOwned,
+            int skippedOtherTeacher,
+            List<String> skippedSubjectNames
+    ) {}
 
     /**
      * Removes a teacher from a class-subject.
@@ -72,7 +100,6 @@ public sealed interface TeacherCommand {
             int assigned,              // subjects newly assigned to this teacher
             int alreadyOwned,          // subjects already assigned to this teacher (no change)
             int skippedOtherTeacher,   // subjects that already have a different teacher (skipped)
-            java.util.List<String> skippedSubjectNames  // names of skipped subjects for display
+            List<String> skippedSubjectNames  // names of skipped subjects for display
     ) {}
-
 }

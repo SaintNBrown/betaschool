@@ -3,8 +3,14 @@ package com.betaschool.api.controller;
 import com.betaschool.api.dto.request.CreateTeacherRequest;
 import com.betaschool.api.dto.response.ApiResponse;
 import com.betaschool.command.model.TeacherCommand.*;
-import com.betaschool.query.model.TeacherQuery.*;
-import com.betaschool.query.model.TeacherQueryResult.*;
+import com.betaschool.query.model.TeacherQuery.GetAllTeachersQuery;
+import com.betaschool.query.model.TeacherQuery.GetTeacherByIdQuery;
+import com.betaschool.query.model.TeacherQuery.GetTeacherClassesQuery;
+import com.betaschool.query.model.TeacherQuery.GetTeacherSubjectsQuery;
+import com.betaschool.query.model.TeacherQueryResult.TeacherClassItem;
+import com.betaschool.query.model.TeacherQueryResult.TeacherDetail;
+import com.betaschool.query.model.TeacherQueryResult.TeacherSubjectItem;
+import com.betaschool.query.model.TeacherQueryResult.TeacherSummary;
 import com.betaschool.shared.CommandBus;
 import com.betaschool.shared.QueryBus;
 import io.swagger.v3.oas.annotations.Operation;
@@ -22,6 +28,7 @@ import java.util.List;
 @RequiredArgsConstructor
 @Tag(name = "Teachers", description = "Teacher management and assignment")
 public class TeacherController {
+
     private final CommandBus commandBus;
     private final QueryBus queryBus;
 
@@ -55,12 +62,40 @@ public class TeacherController {
     }
 
     @PostMapping("/{teacherId}/assign/subject/{classSubjectId}")
-    @Operation(summary = "Assign teacher to a class-subject (subject must have no teacher yet)")
+    @Operation(summary = "Assign teacher to a single class-subject (subject must have no teacher yet)")
     public ResponseEntity<ApiResponse<Long>> assignToSubject(
             @PathVariable Long teacherId,
             @PathVariable Long classSubjectId) {
         Long id = commandBus.dispatch(new AssignTeacherToSubjectCommand(teacherId, classSubjectId));
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.created(id));
+    }
+
+    @PostMapping("/{teacherId}/assign/subjects/bulk")
+    @Operation(summary = "Assign teacher to multiple class-subjects at once (secondary school model)",
+               description = """
+                       Assigns one teacher to several subjects in a single transaction.
+                       Use this when a teacher takes multiple subjects in the same class —
+                       e.g. Mathematics, Basic Science, and Basic Technology.
+
+                       Per-subject behaviour:
+                       - No teacher yet              → assigned to this teacher.
+                       - Already owned by THIS teacher → unchanged (idempotent).
+                       - Owned by a DIFFERENT teacher  → skipped; name returned in result.
+                         Use PUT /teachers/{id}/assign/subject/{id} to explicitly reassign those.
+
+                       Request body: { "classSubjectIds": [1, 2, 3] }
+                       """)
+    public ResponseEntity<ApiResponse<BulkAssignmentResult>> bulkAssignSubjects(
+            @PathVariable Long teacherId,
+            @Valid @RequestBody BulkAssignRequest req) {
+        BulkAssignmentResult result = commandBus.dispatch(
+                new BulkAssignTeacherToSubjectsCommand(teacherId, req.classSubjectIds()));
+        String message = "Assigned " + result.assigned() + " subject(s)."
+                + (result.skippedOtherTeacher() > 0
+                    ? " " + result.skippedOtherTeacher()
+                      + " skipped (already have different teachers) — use reassign to override."
+                    : "");
+        return ResponseEntity.ok(ApiResponse.ok(message, result));
     }
 
     @DeleteMapping("/{teacherId}/assign/subject/{classSubjectId}")
@@ -83,16 +118,16 @@ public class TeacherController {
 
     @PostMapping("/{teacherId}/assign/class-session/{classSessionId}/all-subjects")
     @Operation(summary = "Assign form teacher to ALL subjects in a class-session (primary school model)",
-            description = """
+               description = """
                        Assigns the teacher to every subject in the class-session in a single operation.
                        This supports the primary school model where the class teacher teaches all subjects.
- 
+
                        Behaviour:
                        - Subjects with no teacher assigned → assigned to this teacher.
                        - Subjects already assigned to THIS teacher → left unchanged (idempotent).
                        - Subjects already assigned to a DIFFERENT teacher → SKIPPED (specialist teachers preserved).
                        - Pass setAsFormTeacher=true to also mark this teacher as the form teacher of the class.
- 
+
                        The response body lists how many subjects were assigned, already owned, and skipped,
                        along with the names of any skipped subjects so the admin can review them.
                        """)
@@ -104,9 +139,9 @@ public class TeacherController {
                 new AssignFormTeacherToAllSubjectsCommand(teacherId, classSessionId, setAsFormTeacher));
         return ResponseEntity.ok(ApiResponse.ok(
                 "Form teacher assigned to " + result.assigned() + " subject(s). "
-                        + (result.skippedOtherTeacher() > 0
-                        ? result.skippedOtherTeacher() + " subject(s) skipped (already have specialist teachers)."
-                        : ""),
+                + (result.skippedOtherTeacher() > 0
+                    ? result.skippedOtherTeacher() + " subject(s) skipped (already have specialist teachers)."
+                    : ""),
                 result));
     }
 
@@ -127,4 +162,10 @@ public class TeacherController {
         return ResponseEntity.ok(ApiResponse.ok(
                 queryBus.dispatch(new GetTeacherSubjectsQuery(teacherId, sessionId))));
     }
+
+    // ── Request records ───────────────────────────────────────────────────
+
+    public record BulkAssignRequest(
+            @jakarta.validation.constraints.NotEmpty List<Long> classSubjectIds
+    ) {}
 }

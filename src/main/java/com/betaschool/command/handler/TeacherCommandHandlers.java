@@ -257,6 +257,82 @@ public class TeacherCommandHandlers {
     }
 
     /**
+     * Assigns a teacher to multiple specific subjects in one transaction.
+     * Secondary-school model: a teacher teaches a chosen set of subjects
+     * (e.g. Maths + Basic Science + Basic Tech) rather than all subjects.
+     *
+     * Subjects with no teacher → assigned.
+     * Subjects already owned by THIS teacher → skipped (idempotent).
+     * Subjects owned by a DIFFERENT teacher → skipped; names returned in result
+     *   so the admin can review and use the explicit reassign endpoint if needed.
+     */
+    @Component
+    @RequiredArgsConstructor
+    @Transactional
+    public static class BulkAssignTeacherToSubjectsHandler
+            implements CommandHandler<BulkAssignTeacherToSubjectsCommand, BulkAssignmentResult> {
+
+        private final JpaTeacherRepository teacherRepo;
+        private final JpaClassSubjectRepository classSubjectRepo;
+        private final JpaTeacherSubjectAssignmentRepository assignmentRepo;
+
+        @Override
+        public BulkAssignmentResult handle(BulkAssignTeacherToSubjectsCommand cmd) {
+            Long schoolId = SchoolIdInjector.require();
+
+            if (cmd.classSubjectIds() == null || cmd.classSubjectIds().isEmpty()) {
+                throw new BusinessRuleViolationException(
+                        "classSubjectIds must not be empty. Provide at least one subject to assign.");
+            }
+
+            TeacherEntity teacher = teacherRepo.findByIdAndSchoolId(cmd.teacherId(), schoolId)
+                    .orElseThrow(() -> new ResourceNotFoundException("Teacher", cmd.teacherId()));
+
+            int assigned            = 0;
+            int alreadyOwned        = 0;
+            int skippedOtherTeacher = 0;
+            List<String> skippedNames  = new java.util.ArrayList<>();
+            List<TeacherSubjectAssignmentEntity> toSave = new java.util.ArrayList<>();
+
+            for (Long classSubjectId : cmd.classSubjectIds()) {
+                ClassSubjectEntity subject = classSubjectRepo
+                        .findByIdAndSchoolId(classSubjectId, schoolId)
+                        .orElseThrow(() -> new ResourceNotFoundException("ClassSubject", classSubjectId));
+
+                var existingOpt = assignmentRepo.findByClassSubjectIdAndSchoolId(classSubjectId, schoolId);
+
+                if (existingOpt.isPresent()) {
+                    TeacherSubjectAssignmentEntity existing = existingOpt.get();
+                    if (existing.getTeacher().getId().equals(cmd.teacherId())) {
+                        alreadyOwned++;
+                    } else {
+                        // Different teacher already owns this subject — skip.
+                        // Admin must use PUT /teachers/{id}/assign/subject/{id} to explicitly reassign.
+                        skippedOtherTeacher++;
+                        skippedNames.add(subject.getSubject().getName());
+                    }
+                } else {
+                    toSave.add(TeacherSubjectAssignmentEntity.builder()
+                            .teacher(teacher)
+                            .classSubject(subject)
+                            .schoolId(schoolId)
+                            .build());
+                    assigned++;
+                }
+            }
+
+            if (!toSave.isEmpty()) {
+                assignmentRepo.saveAll(toSave);
+            }
+
+            log.info("Bulk assign: teacher={} assigned={} alreadyOwned={} skipped={} school={}",
+                    cmd.teacherId(), assigned, alreadyOwned, skippedOtherTeacher, schoolId);
+
+            return new BulkAssignmentResult(assigned, alreadyOwned, skippedOtherTeacher, skippedNames);
+        }
+    }
+
+    /**
      * Primary-school form teacher bulk assignment.
      *
      * Assigns the given teacher to every subject in the class-session in a single
