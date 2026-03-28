@@ -44,6 +44,9 @@ spring:
       time-to-live: 600000  # 10 minutes
 
 
+  # ── Email (SMTP) ──────────────────────────────────────────────────────────
+  # Set MAIL_USERNAME to a non-empty value to activate the live email sender.
+  # Leave blank (default) to use the no-op logger (dev mode).
   mail:
     host: ${MAIL_HOST:smtp.gmail.com}
     port: ${MAIL_PORT:587}
@@ -99,17 +102,29 @@ app:
       # How long a reset token is valid (minutes)
       token-expiry-minutes: ${PASSWORD_RESET_EXPIRY_MINUTES:30}
 
-    management:
-      health:
-        # Disable the mail health indicator — it opens a live SMTP connection on every
-        # health check which fails in environments that block outbound port 587/465.
-        # Email delivery failures are handled in EmailService and logged there instead.
-        mail:
-          enabled: false
-      endpoints:
-        web:
-          exposure:
-            include: health,info
-      endpoint:
-        health:
-          show-details: when-authorized
+# ── Actuator ──────────────────────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+    info:
+      enabled: true
+  health:
+    # MailHealthIndicator opens a live TCP connection to SMTP on every health
+    # check — fails in Docker where outbound 587 is blocked. Disabled here;
+    # email delivery failures are logged by EmailService on the actual send.
+    mail:
+      enabled: false
+  info:
+    env:
+      enabled: true
+
+# ── /actuator/info content ────────────────────────────────────────────────────
+info:
+  app:
+    name: BetaSchool Backend
+    version: 1.0.0
