@@ -174,6 +174,13 @@ public class AuthController {
         return ResponseEntity.ok(ApiResponse.noContent("User deactivated"));
     }
 
+    @PatchMapping("/schools/users/{userId}/reactivate")
+    @Operation(summary = "[SCHOOL_ADMIN] Reactivate a previously deactivated user")
+    public ResponseEntity<ApiResponse<Void>> reactivateUser(@PathVariable Long userId) {
+        commandBus.dispatch(new ReactivateUserCommand(userId));
+        return ResponseEntity.ok(ApiResponse.noContent("User reactivated"));
+    }
+
     // ── Request body records ──────────────────────────────────────────────
 
     public record LoginRequest(String email, String password) {}

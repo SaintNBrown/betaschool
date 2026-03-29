@@ -1,9 +1,17 @@
 package com.betaschool.query.handler;
 
 import com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity;
-import com.betaschool.infrastructure.persistence.repository.*;
-import com.betaschool.query.model.TeacherQuery.*;
-import com.betaschool.query.model.TeacherQueryResult.*;
+import com.betaschool.infrastructure.persistence.repository.JpaTeacherClassAssignmentRepository;
+import com.betaschool.infrastructure.persistence.repository.JpaTeacherRepository;
+import com.betaschool.infrastructure.persistence.repository.JpaTeacherSubjectAssignmentRepository;
+import com.betaschool.query.model.TeacherQuery.GetAllTeachersQuery;
+import com.betaschool.query.model.TeacherQuery.GetTeacherByIdQuery;
+import com.betaschool.query.model.TeacherQuery.GetTeacherClassesQuery;
+import com.betaschool.query.model.TeacherQuery.GetTeacherSubjectsQuery;
+import com.betaschool.query.model.TeacherQueryResult.TeacherClassItem;
+import com.betaschool.query.model.TeacherQueryResult.TeacherDetail;
+import com.betaschool.query.model.TeacherQueryResult.TeacherSubjectItem;
+import com.betaschool.query.model.TeacherQueryResult.TeacherSummary;
 import com.betaschool.shared.QueryHandler;
 import com.betaschool.shared.exception.ResourceNotFoundException;
 import com.betaschool.tenant.context.TenantContext;
@@ -23,15 +31,30 @@ public class TeacherQueryHandlers {
     public static class GetAllTeachersHandler implements QueryHandler<GetAllTeachersQuery, List<TeacherSummary>> {
 
         private final JpaTeacherRepository teacherRepo;
+        private final com.betaschool.infrastructure.persistence.repository.auth.JpaUserProfileRepository profileRepo;
+        private final com.betaschool.infrastructure.persistence.repository.auth.JpaAppUserRepository userRepo;
         private final TenantGuard tenantGuard;
 
         @Override
         public List<TeacherSummary> handle(GetAllTeachersQuery query) {
             Long schoolId = tenantGuard.requireSchoolId();
-            // Only SCHOOL_ADMIN and SYSTEM_ADMIN may list all teachers
             tenantGuard.requireRole("SCHOOL_ADMIN", "SYSTEM_ADMIN");
             return teacherRepo.findBySchoolId(schoolId).stream()
-                    .map(t -> new TeacherSummary(t.getId(), t.getSurname(), t.getOtherNames(), t.getEmail()))
+                    .map(t -> {
+                        // Look up the linked AppUser account via UserProfile
+                        var profileOpt = profileRepo.findByProfileIdAndProfileType(
+                                t.getId(),
+                                UserProfileEntity.ProfileType.TEACHER);
+                        String status = "NO_ACCOUNT";
+                        Long userId = null;
+                        if (profileOpt.isPresent()) {
+                            var appUser = profileOpt.get().getUser();
+                            status = appUser.getStatus().name();
+                            userId = appUser.getId();
+                        }
+                        return new TeacherSummary(t.getId(), t.getSurname(), t.getOtherNames(),
+                                t.getEmail(), status, userId);
+                    })
                     .collect(Collectors.toList());
         }
     }

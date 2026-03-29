@@ -3,25 +3,15 @@ package com.betaschool.auth.handler;
 import com.betaschool.auth.command.AuthCommand.*;
 import com.betaschool.auth.jwt.JwtService;
 import com.betaschool.auth.jwt.JwtService.TokenClaims;
-import com.betaschool.infrastructure.persistence.entity.auth.AppUserEntity;
+import com.betaschool.infrastructure.mail.EmailService;
+import com.betaschool.infrastructure.persistence.entity.SchoolScoreConfigEntity;
+import com.betaschool.infrastructure.persistence.entity.auth.*;
 import com.betaschool.infrastructure.persistence.entity.auth.AppUserEntity.UserRole;
 import com.betaschool.infrastructure.persistence.entity.auth.AppUserEntity.UserStatus;
-import com.betaschool.infrastructure.persistence.entity.auth.SchoolAuditLogEntity;
-import com.betaschool.infrastructure.persistence.entity.auth.SchoolEntity;
 import com.betaschool.infrastructure.persistence.entity.auth.SchoolEntity.SchoolStatus;
-import com.betaschool.infrastructure.persistence.entity.auth.UserAuditLogEntity;
-import com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity;
 import com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity.ProfileType;
-import com.betaschool.infrastructure.persistence.repository.auth.JpaAppUserRepository;
-import com.betaschool.infrastructure.persistence.repository.auth.JpaSchoolAuditLogRepository;
-import com.betaschool.infrastructure.persistence.repository.auth.JpaSchoolRepository;
-import com.betaschool.infrastructure.persistence.repository.auth.JpaUserAuditLogRepository;
-import com.betaschool.infrastructure.persistence.repository.auth.JpaUserProfileRepository;
-import com.betaschool.infrastructure.persistence.entity.SchoolScoreConfigEntity;
 import com.betaschool.infrastructure.persistence.repository.JpaSchoolScoreConfigRepository;
-import com.betaschool.infrastructure.persistence.entity.auth.PasswordResetTokenEntity;
-import com.betaschool.infrastructure.persistence.repository.auth.JpaPasswordResetTokenRepository;
-import com.betaschool.infrastructure.mail.EmailService;
+import com.betaschool.infrastructure.persistence.repository.auth.*;
 import com.betaschool.shared.CommandHandler;
 import com.betaschool.shared.exception.BusinessRuleViolationException;
 import com.betaschool.shared.exception.ResourceNotFoundException;
@@ -188,7 +178,7 @@ public class AuthCommandHandlers {
             AppUserEntity user = userRepo.findById(userId)
                     .orElseThrow(() -> new ResourceNotFoundException("User", userId));
 
-            if (user.getStatus() != AppUserEntity.UserStatus.ACTIVE) {
+            if (user.getStatus() != UserStatus.ACTIVE) {
                 throw new TenantAccessDeniedException("Account is not active.");
             }
 
@@ -198,7 +188,7 @@ public class AuthCommandHandlers {
             Long profileId  = userProfileRepo.findByUserId(userId)
                     .map(p -> p.getProfileId()).orElse(null);
 
-            JwtService.TokenClaims tokenClaims = new JwtService.TokenClaims(
+            TokenClaims tokenClaims = new TokenClaims(
                     userId, user.getEmail(), user.getRole().name(),
                     schoolId, schoolSlug, profileId);
 
@@ -449,8 +439,8 @@ public class AuthCommandHandlers {
                 if (cmd.profileId() == null) {
                     throw new BusinessRuleViolationException(
                             "profileId is required when creating a " + role + " account. "
-                                    + "Create the " + role.name().toLowerCase() + " record first "
-                                    + "(POST /teachers or POST /students), then pass the returned id as profileId.");
+                            + "Create the " + role.name().toLowerCase() + " record first "
+                            + "(POST /teachers or POST /students), then pass the returned id as profileId.");
                 }
                 ProfileType profileType = role == UserRole.STUDENT
                         ? ProfileType.STUDENT : ProfileType.TEACHER;
@@ -467,7 +457,10 @@ public class AuthCommandHandlers {
 
     // ── Deactivate User ────────────────────────────────────────────────────
 
-
+    /**
+     * Issue 10: corrected to use UserStatus.INACTIVE (intentional admin deactivation),
+     * not SUSPENDED (platform-level hold). Also now writes a user_audit_log entry.
+     */
     @Component
     @RequiredArgsConstructor
     @Transactional
@@ -504,6 +497,48 @@ public class AuthCommandHandlers {
 
             log.info("User DEACTIVATED: id={} email={} by={}",
                     user.getId(), user.getEmail(), performedBy);
+            return null;
+        }
+    }
+
+    // ── Reactivate User ────────────────────────────────────────────────────
+
+    @Component
+    @RequiredArgsConstructor
+    @Transactional
+    public static class ReactivateUserHandler implements CommandHandler<ReactivateUserCommand, Void> {
+
+        private final JpaAppUserRepository userRepo;
+        private final JpaUserAuditLogRepository userAuditRepo;
+        private final TenantGuard tenantGuard;
+
+        @Override
+        public Void handle(ReactivateUserCommand cmd) {
+            tenantGuard.requireRole("SYSTEM_ADMIN", "SCHOOL_ADMIN");
+
+            AppUserEntity user = userRepo.findById(cmd.userId())
+                    .orElseThrow(() -> new ResourceNotFoundException("User", cmd.userId()));
+
+            if (!TenantContext.isSystemAdmin()) {
+                tenantGuard.assertBelongsToCurrentSchool(
+                        user.getSchool() != null ? user.getSchool().getId() : null);
+            }
+
+            if (user.getStatus() == UserStatus.ACTIVE) {
+                throw new BusinessRuleViolationException("User account is already active.");
+            }
+
+            user.setStatus(UserStatus.ACTIVE);
+            userRepo.save(user);
+
+            userAuditRepo.save(UserAuditLogEntity.builder()
+                    .userId(user.getId())
+                    .schoolId(user.getSchool() != null ? user.getSchool().getId() : null)
+                    .action("REACTIVATED")
+                    .build());
+
+            log.info("User REACTIVATED: id={} email={} by={}",
+                    user.getId(), user.getEmail(), TenantContext.getUserId());
             return null;
         }
     }
@@ -604,8 +639,8 @@ public class AuthCommandHandlers {
             if (!resetToken.isValid()) {
                 throw new BusinessRuleViolationException(
                         resetToken.isExpired()
-                                ? "This password reset link has expired. Please request a new one."
-                                : "This password reset link has already been used.");
+                            ? "This password reset link has expired. Please request a new one."
+                            : "This password reset link has already been used.");
             }
 
             AppUserEntity user = resetToken.getUser();

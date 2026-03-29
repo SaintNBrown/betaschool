@@ -69,6 +69,11 @@ public sealed interface AuthCommand {
             Long schoolId          // set by handler from TenantContext
     ) implements Command<Void>, AuthCommand {}
 
+    /** Reactivates a previously deactivated (INACTIVE) user account. */
+    record ReactivateUserCommand(
+            Long userId
+    ) implements Command<Void>, AuthCommand {}
+
     record ChangePasswordCommand(
             Long userId,
             @NotBlank String currentPassword,
