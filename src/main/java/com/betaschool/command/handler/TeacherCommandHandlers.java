@@ -93,16 +93,24 @@ public class TeacherCommandHandlers {
         public Long handle(AssignTeacherToClassCommand cmd) {
             Long schoolId = SchoolIdInjector.require();
 
-            if (assignmentRepo.existsByTeacherIdAndClassSessionIdAndSchoolId(
-                    cmd.teacherId(), cmd.classSessionId(), schoolId)) {
-                throw new BusinessRuleViolationException(
-                        "Teacher is already assigned to this class-session");
-            }
-
-            if (cmd.isFormTeacher()) {
-                assignmentRepo.findByClassSessionIdAndFormTeacherTrueAndSchoolId(cmd.classSessionId(), schoolId)
-                        .ifPresent(e -> { throw new BusinessRuleViolationException(
-                                "Class-session already has a form teacher assigned"); });
+            // ── Idempotency: if already assigned, don't error — just update formTeacher if needed ──
+            var existingOpt = assignmentRepo.findByTeacherIdAndClassSessionIdAndSchoolId(
+                    cmd.teacherId(), cmd.classSessionId(), schoolId);
+            if (existingOpt.isPresent()) {
+                TeacherClassAssignmentEntity existing = existingOpt.get();
+                if (cmd.isFormTeacher() && !existing.isFormTeacher()) {
+                    // Check no other teacher already holds form teacher for this class
+                    assignmentRepo.findByClassSessionIdAndFormTeacherTrueAndSchoolId(cmd.classSessionId(), schoolId)
+                            .ifPresent(other -> {
+                                if (!other.getTeacher().getId().equals(cmd.teacherId())) {
+                                    throw new BusinessRuleViolationException(
+                                            "Class-session already has a different form teacher assigned");
+                                }
+                            });
+                    existing.setFormTeacher(true);
+                    assignmentRepo.save(existing);
+                }
+                return existing.getId();
             }
 
             TeacherEntity teacher = teacherRepo.findByIdAndSchoolId(cmd.teacherId(), schoolId)
@@ -111,6 +119,19 @@ public class TeacherCommandHandlers {
             ClassSessionEntity classSession = classSessionRepo
                     .findByIdAndSchoolId(cmd.classSessionId(), schoolId)
                     .orElseThrow(() -> new ResourceNotFoundException("ClassSession", cmd.classSessionId()));
+
+            // For a brand-new assignment with isFormTeacher=true, guard against
+            // displacing an existing form teacher from a different teacher.
+            if (cmd.isFormTeacher()) {
+                assignmentRepo.findByClassSessionIdAndFormTeacherTrueAndSchoolId(cmd.classSessionId(), schoolId)
+                        .ifPresent(other -> {
+                            if (!other.getTeacher().getId().equals(cmd.teacherId())) {
+                                throw new BusinessRuleViolationException(
+                                        "Class-session already has a different form teacher assigned. " +
+                                        "Unset the existing form teacher first.");
+                            }
+                        });
+            }
 
             TeacherClassAssignmentEntity assignment = TeacherClassAssignmentEntity.builder()
                     .teacher(teacher)
