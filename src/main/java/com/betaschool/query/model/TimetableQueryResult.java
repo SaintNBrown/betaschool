@@ -50,4 +50,22 @@ public sealed interface TimetableQueryResult {
             String activityLabel,       // null for SUBJECT
             Integer sortOrder
     ) implements TimetableQueryResult {}
+
+    /**
+     * Describes one teacher scheduling conflict found during pre-publish validation
+     * or the standalone conflicts check endpoint.
+     *
+     * Every field is populated so the message is immediately actionable — the admin
+     * can see exactly which teacher, which class, which day, and which time to resolve.
+     */
+    record TeacherConflict(
+            Long   teacherId,
+            String teacherName,
+            String conflictingClassName,    // the other class that already has this teacher
+            String dayOfWeek,
+            LocalTime conflictingStart,
+            LocalTime conflictingEnd,
+            String subjectBeingPublished,   // subject in the timetable being published
+            String subjectAlreadyScheduled  // subject in the conflicting timetable
+    ) implements TimetableQueryResult {}
 }

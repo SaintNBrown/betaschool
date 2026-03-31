@@ -8,8 +8,10 @@ import com.betaschool.infrastructure.persistence.repository.JpaTimetableReposito
 import com.betaschool.infrastructure.persistence.repository.JpaTimetableSlotRepository;
 import com.betaschool.query.model.TimetableQuery.GetActiveTimetableQuery;
 import com.betaschool.query.model.TimetableQuery.GetTimetableByIdQuery;
+import com.betaschool.query.model.TimetableQuery.GetTimetableConflictsQuery;
 import com.betaschool.query.model.TimetableQuery.GetTimetableHistoryQuery;
 import com.betaschool.query.model.TimetableQueryResult.SlotDetail;
+import com.betaschool.query.model.TimetableQueryResult.TeacherConflict;
 import com.betaschool.query.model.TimetableQueryResult.TimetableDetail;
 import com.betaschool.query.model.TimetableQueryResult.TimetableSummary;
 import com.betaschool.shared.QueryHandler;
@@ -19,6 +21,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -171,6 +174,77 @@ public class TimetableQueryHandlers {
                     null, null, null, null,
                     slot.getActivityLabel(),
                     slot.getSortOrder());
+        }
+    }
+
+    /**
+     * Returns all cross-class teacher conflicts for the active timetable of a
+     * class-session without throwing. Intended for the pre-publish conflict check
+     * endpoint so the frontend can surface issues before the admin attempts to publish.
+     *
+     * Returns an empty list when there are no conflicts (the happy path).
+     */
+    @Component
+    @RequiredArgsConstructor
+    @Transactional(readOnly = true)
+    public static class GetTimetableConflictsHandler
+            implements QueryHandler<GetTimetableConflictsQuery, List<TeacherConflict>> {
+
+        private final JpaTimetableRepository timetableRepo;
+        private final JpaTimetableSlotRepository slotRepo;
+        private final TenantGuard tenantGuard;
+
+        @Override
+        public List<TeacherConflict> handle(GetTimetableConflictsQuery query) {
+            Long schoolId = tenantGuard.requireSchoolId();
+
+            TimetableEntity timetable = timetableRepo
+                    .findByClassSessionIdAndSchoolIdAndActiveTrue(query.classSessionId(), schoolId)
+                    .orElseThrow(() -> new ResourceNotFoundException(
+                            "No active timetable for class-session id=" + query.classSessionId()
+                            + ". Publish a timetable first."));
+
+            List<TimetableSlotEntity> slots = slotRepo
+                    .findByTimetableIdAndSchoolIdOrdered(timetable.getId(), schoolId);
+
+            List<TeacherConflict> conflicts = new ArrayList<>();
+
+            for (TimetableSlotEntity slot : slots) {
+                if (slot.getSlotType() != SlotType.SUBJECT) continue;
+                if (slot.getClassSubject() == null) continue;
+                if (slot.getClassSubject().getTeacherAssignment() == null) continue;
+
+                TeacherEntity teacher = slot.getClassSubject().getTeacherAssignment().getTeacher();
+                String subjectInThisTimetable = slot.getClassSubject().getSubject().getName();
+
+                List<TimetableSlotEntity> conflicting = slotRepo.findConflictingTeacherSlots(
+                        teacher.getId(),
+                        slot.getDayOfWeek(),
+                        slot.getStartTime(),
+                        slot.getEndTime(),
+                        query.classSessionId(),
+                        schoolId);
+
+                for (TimetableSlotEntity conflict : conflicting) {
+                    String conflictingClassName = conflict.getTimetable()
+                            .getClassSession().getClazz().getName();
+                    String alreadyScheduledSubject = (conflict.getClassSubject() != null)
+                            ? conflict.getClassSubject().getSubject().getName()
+                            : "Unknown Subject";
+
+                    conflicts.add(new TeacherConflict(
+                            teacher.getId(),
+                            teacher.getSurname() + " " + teacher.getOtherNames(),
+                            conflictingClassName,
+                            slot.getDayOfWeek().name(),
+                            conflict.getStartTime(),
+                            conflict.getEndTime(),
+                            subjectInThisTimetable,
+                            alreadyScheduledSubject));
+                }
+            }
+
+            return conflicts;
         }
     }
 }

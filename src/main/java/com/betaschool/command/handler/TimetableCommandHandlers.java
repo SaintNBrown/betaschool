@@ -3,16 +3,14 @@ package com.betaschool.command.handler;
 import com.betaschool.command.model.TimetableCommand.DeleteTimetableVersionCommand;
 import com.betaschool.command.model.TimetableCommand.PublishTimetableCommand;
 import com.betaschool.command.model.TimetableCommand.TimetableSlotInput;
-import com.betaschool.infrastructure.persistence.entity.ClassSessionEntity;
-import com.betaschool.infrastructure.persistence.entity.ClassSubjectEntity;
-import com.betaschool.infrastructure.persistence.entity.TimetableEntity;
-import com.betaschool.infrastructure.persistence.entity.TimetableSlotEntity;
+import com.betaschool.infrastructure.persistence.entity.*;
 import com.betaschool.infrastructure.persistence.entity.TimetableSlotEntity.DayOfWeek;
 import com.betaschool.infrastructure.persistence.entity.TimetableSlotEntity.SlotType;
 import com.betaschool.infrastructure.persistence.repository.JpaClassSessionRepository;
 import com.betaschool.infrastructure.persistence.repository.JpaClassSubjectRepository;
 import com.betaschool.infrastructure.persistence.repository.JpaTimetableRepository;
 import com.betaschool.infrastructure.persistence.repository.JpaTimetableSlotRepository;
+import com.betaschool.query.model.TimetableQueryResult.TeacherConflict;
 import com.betaschool.shared.CommandHandler;
 import com.betaschool.shared.exception.BusinessRuleViolationException;
 import com.betaschool.shared.exception.ResourceNotFoundException;
@@ -26,6 +24,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 @Slf4j
 public class TimetableCommandHandlers {
@@ -53,8 +52,6 @@ public class TimetableCommandHandlers {
         private final JpaTimetableSlotRepository slotRepo;
         private final JpaClassSessionRepository classSessionRepo;
         private final JpaClassSubjectRepository classSubjectRepo;
-
-        @Override
         public Long handle(PublishTimetableCommand cmd) {
             Long schoolId = SchoolIdInjector.require();
             Long currentUserId = TenantContext.getUserId();
@@ -138,8 +135,27 @@ public class TimetableCommandHandlers {
                         .build());
             }
 
-            // ── Overlap detection per day ────────────────────────────────────
+            // ── Overlap detection per day (within this class) ────────────────
             validateNoOverlaps(validatedSlots);
+
+            // ── Cross-class teacher conflict detection ───────────────────────
+            // Collects ALL conflicts before throwing so the admin sees everything
+            // in one response instead of fixing one at a time.
+            List<TeacherConflict> teacherConflicts =
+                    detectTeacherConflicts(validatedSlots, cmd.classSessionId(), schoolId);
+            if (!teacherConflicts.isEmpty()) {
+                String detail = teacherConflicts.stream()
+                        .map(c -> String.format(
+                                "Teacher conflict: %s is already scheduled in %s at %s %s–%s " +
+                                "(subject: %s conflicts with %s)",
+                                c.teacherName(), c.conflictingClassName(), c.dayOfWeek(),
+                                c.conflictingStart(), c.conflictingEnd(),
+                                c.subjectBeingPublished(), c.subjectAlreadyScheduled()))
+                        .collect(Collectors.joining("\n"));
+                throw new BusinessRuleViolationException(
+                        "Timetable has " + teacherConflicts.size()
+                        + " teacher conflict(s):\n" + detail);
+            }
 
             // ── Deactivate current active timetable ──────────────────────────
             timetableRepo.deactivateAllForClassSession(cmd.classSessionId(), schoolId);
@@ -171,6 +187,61 @@ public class TimetableCommandHandlers {
                     nextVersion, cmd.classSessionId(), schoolId);
 
             return savedTimetable.getId();
+        }
+
+        /**
+         * Checks every SUBJECT slot in the timetable being published against all
+         * currently active timetables in the same school.
+         *
+         * A conflict exists when the same teacher is scheduled in a different class
+         * at an overlapping time on the same day. The teacher is resolved via the
+         * class-subject's current teacher_subject_assignment — if no teacher is
+         * assigned to the subject yet, the slot is skipped (no conflict possible).
+         *
+         * Returns all conflicts found (never throws) so the caller can collect and
+         * report them all at once.
+         */
+        List<TeacherConflict> detectTeacherConflicts(
+                List<TimetableSlotEntity> slots, Long classSessionId, Long schoolId) {
+
+            List<TeacherConflict> conflicts = new ArrayList<>();
+
+            for (TimetableSlotEntity slot : slots) {
+                if (slot.getSlotType() != SlotType.SUBJECT) continue;
+                if (slot.getClassSubject() == null) continue;
+                if (slot.getClassSubject().getTeacherAssignment() == null) continue;
+
+                TeacherEntity teacher = slot.getClassSubject().getTeacherAssignment().getTeacher();
+                String subjectBeingPublished = slot.getClassSubject().getSubject().getName();
+
+                List<TimetableSlotEntity> conflicting = slotRepo.findConflictingTeacherSlots(
+                        teacher.getId(),
+                        slot.getDayOfWeek(),
+                        slot.getStartTime(),
+                        slot.getEndTime(),
+                        classSessionId,
+                        schoolId);
+
+                for (TimetableSlotEntity conflict : conflicting) {
+                    String conflictingClassName = conflict.getTimetable()
+                            .getClassSession().getClazz().getName();
+                    String alreadyScheduledSubject = (conflict.getClassSubject() != null)
+                            ? conflict.getClassSubject().getSubject().getName()
+                            : "Unknown Subject";
+
+                    conflicts.add(new TeacherConflict(
+                            teacher.getId(),
+                            teacher.getSurname() + " " + teacher.getOtherNames(),
+                            conflictingClassName,
+                            slot.getDayOfWeek().name(),
+                            conflict.getStartTime(),
+                            conflict.getEndTime(),
+                            subjectBeingPublished,
+                            alreadyScheduledSubject));
+                }
+            }
+
+            return conflicts;
         }
 
         /**

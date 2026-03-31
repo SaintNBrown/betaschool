@@ -6,7 +6,9 @@ import com.betaschool.command.model.TimetableCommand.PublishTimetableCommand;
 import com.betaschool.command.model.TimetableCommand.TimetableSlotInput;
 import com.betaschool.query.model.TimetableQuery.GetActiveTimetableQuery;
 import com.betaschool.query.model.TimetableQuery.GetTimetableByIdQuery;
+import com.betaschool.query.model.TimetableQuery.GetTimetableConflictsQuery;
 import com.betaschool.query.model.TimetableQuery.GetTimetableHistoryQuery;
+import com.betaschool.query.model.TimetableQueryResult.TeacherConflict;
 import com.betaschool.query.model.TimetableQueryResult.TimetableDetail;
 import com.betaschool.query.model.TimetableQueryResult.TimetableSummary;
 import com.betaschool.shared.CommandBus;
@@ -56,6 +58,23 @@ public class TimetableController {
             @PathVariable Long classSessionId) {
         return ResponseEntity.ok(ApiResponse.ok(
                 queryBus.dispatch(new GetTimetableHistoryQuery(classSessionId))));
+    }
+
+    @GetMapping("/class-sessions/{classSessionId}/conflicts")
+    @Operation(summary = "[SCHOOL_ADMIN] Check the active timetable for cross-class teacher conflicts",
+               description = """
+                       Runs the same teacher conflict detection used during publishing, but returns
+                       the list of conflicts without throwing — so the admin can review them before
+                       attempting to publish an updated timetable.
+
+                       Returns an empty list when no conflicts exist (the happy path).
+                       Each conflict entry names the teacher, the clashing class, the day, the
+                       time window, and both subject names so the issue is immediately actionable.
+                       """)
+    public ResponseEntity<ApiResponse<List<TeacherConflict>>> getConflicts(
+            @PathVariable Long classSessionId) {
+        return ResponseEntity.ok(ApiResponse.ok(
+                queryBus.dispatch(new GetTimetableConflictsQuery(classSessionId))));
     }
 
     @GetMapping("/{timetableId}")

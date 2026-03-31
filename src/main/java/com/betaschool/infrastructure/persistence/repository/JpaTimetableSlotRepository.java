@@ -28,4 +28,41 @@ public interface JpaTimetableSlotRepository extends JpaRepository<TimetableSlotE
             @Param("timetableId") Long timetableId,
             @Param("schoolId") Long schoolId,
             @Param("dayOfWeek") TimetableSlotEntity.DayOfWeek dayOfWeek);
+
+    /**
+     * Finds SUBJECT slots in OTHER class-sessions (not the one being published)
+     * where the given teacher is already scheduled on the given day and the time
+     * windows overlap.
+     *
+     * Overlap condition: existing.startTime < :endTime AND existing.endTime > :startTime
+     * (standard interval overlap — two intervals overlap iff neither ends before the other starts)
+     *
+     * Only checks active timetables — historical versions do not block scheduling.
+     * JOIN FETCHes the timetable → classSession → clazz chain and classSubject → subject
+     * in a single query to avoid N+1 lazy-load hits when building conflict messages.
+     */
+    @Query("""
+        SELECT s FROM TimetableSlotEntity s
+        JOIN FETCH s.timetable tt
+        JOIN FETCH tt.classSession tcs
+        JOIN FETCH tcs.clazz cl
+        JOIN FETCH s.classSubject csubj
+        JOIN FETCH csubj.subject subj
+        JOIN csubj.teacherAssignment ta
+        JOIN ta.teacher t
+        WHERE t.id = :teacherId
+          AND s.dayOfWeek = :dayOfWeek
+          AND s.startTime < :endTime
+          AND s.endTime > :startTime
+          AND tcs.id <> :excludeClassSessionId
+          AND tt.active = true
+          AND s.schoolId = :schoolId
+        """)
+    List<TimetableSlotEntity> findConflictingTeacherSlots(
+            @Param("teacherId")              Long teacherId,
+            @Param("dayOfWeek")              TimetableSlotEntity.DayOfWeek dayOfWeek,
+            @Param("startTime")              java.time.LocalTime startTime,
+            @Param("endTime")                java.time.LocalTime endTime,
+            @Param("excludeClassSessionId")  Long excludeClassSessionId,
+            @Param("schoolId")               Long schoolId);
 }

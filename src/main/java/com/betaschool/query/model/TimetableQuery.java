@@ -20,4 +20,13 @@ public sealed interface TimetableQuery {
     record GetTimetableByIdQuery(
             Long timetableId
     ) implements Query<TimetableQueryResult.TimetableDetail>, TimetableQuery {}
+
+    /**
+     * Runs cross-class teacher conflict detection against the currently active
+     * timetable for a class-session without throwing — returns the list of conflicts.
+     * Use this to surface conflicts in the UI before the admin attempts to publish.
+     */
+    record GetTimetableConflictsQuery(
+            Long classSessionId
+    ) implements Query<List<TimetableQueryResult.TeacherConflict>>, TimetableQuery {}
 }
