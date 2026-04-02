@@ -7,16 +7,20 @@ spring:
     username: ${DB_USERNAME:betaschool}
     password: ${DB_PASSWORD:betaschool}
     hikari:
-      maximum-pool-size: 20
-      minimum-idle: 5
+      maximum-pool-size: 5
+      minimum-idle: 1
       validation-timeout: 5000
-      connection-timeout: 30000
+      idle-timeout: 300000
+      max-lifetime: 900000
+      connection-timeout: 10000
       data-source-properties:
         prepareThreshold: 0       # don't cache prepared statements server-side at all
         preferQueryMode: simple   # use PostgreSQL's simple query protocol instead of extended
+        binaryTransfer: false
+        ApplicationName: betaschool-backend
       connection-init-sql: "SELECT 1"
       connection-test-query: "SELECT 1"   # validate connection before handing to app
-      keepalive-time: 30000 # keepalive every 30s to prevent idle timeout
+      keepalive-time: 60000 # keepalive every 60s to prevent idle timeout
 
   jpa:
     hibernate:

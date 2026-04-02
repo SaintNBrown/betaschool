@@ -1,17 +1,9 @@
 package com.betaschool.query.handler;
 
 import com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity;
-import com.betaschool.infrastructure.persistence.repository.JpaTeacherClassAssignmentRepository;
-import com.betaschool.infrastructure.persistence.repository.JpaTeacherRepository;
-import com.betaschool.infrastructure.persistence.repository.JpaTeacherSubjectAssignmentRepository;
-import com.betaschool.query.model.TeacherQuery.GetAllTeachersQuery;
-import com.betaschool.query.model.TeacherQuery.GetTeacherByIdQuery;
-import com.betaschool.query.model.TeacherQuery.GetTeacherClassesQuery;
-import com.betaschool.query.model.TeacherQuery.GetTeacherSubjectsQuery;
-import com.betaschool.query.model.TeacherQueryResult.TeacherClassItem;
-import com.betaschool.query.model.TeacherQueryResult.TeacherDetail;
-import com.betaschool.query.model.TeacherQueryResult.TeacherSubjectItem;
-import com.betaschool.query.model.TeacherQueryResult.TeacherSummary;
+import com.betaschool.infrastructure.persistence.repository.*;
+import com.betaschool.query.model.TeacherQuery.*;
+import com.betaschool.query.model.TeacherQueryResult.*;
 import com.betaschool.shared.QueryHandler;
 import com.betaschool.shared.exception.ResourceNotFoundException;
 import com.betaschool.tenant.context.TenantContext;
@@ -21,6 +13,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 public class TeacherQueryHandlers {
@@ -32,25 +25,40 @@ public class TeacherQueryHandlers {
 
         private final JpaTeacherRepository teacherRepo;
         private final com.betaschool.infrastructure.persistence.repository.auth.JpaUserProfileRepository profileRepo;
-        private final com.betaschool.infrastructure.persistence.repository.auth.JpaAppUserRepository userRepo;
         private final TenantGuard tenantGuard;
 
         @Override
         public List<TeacherSummary> handle(GetAllTeachersQuery query) {
             Long schoolId = tenantGuard.requireSchoolId();
             tenantGuard.requireRole("SCHOOL_ADMIN", "SYSTEM_ADMIN");
-            return teacherRepo.findBySchoolId(schoolId).stream()
+
+            List<com.betaschool.infrastructure.persistence.entity.TeacherEntity> teachers =
+                    teacherRepo.findBySchoolId(schoolId);
+            if (teachers.isEmpty()) return List.of();
+
+            // Batch-load all teacher account profiles in ONE query instead of
+            // calling findByProfileIdAndProfileType() once per teacher (N+1).
+            List<Long> teacherIds = teachers.stream()
+                    .map(com.betaschool.infrastructure.persistence.entity.TeacherEntity::getId)
+                    .collect(Collectors.toList());
+
+            Map<Long, UserProfileEntity> profileByTeacherId =
+                    profileRepo.findByProfileIdInAndProfileType(
+                                    teacherIds,
+                                    com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity.ProfileType.TEACHER)
+                            .stream()
+                            .collect(Collectors.toMap(
+                                    com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity::getProfileId,
+                                    p -> p));
+
+            return teachers.stream()
                     .map(t -> {
-                        // Look up the linked AppUser account via UserProfile
-                        var profileOpt = profileRepo.findByProfileIdAndProfileType(
-                                t.getId(),
-                                UserProfileEntity.ProfileType.TEACHER);
+                        var profile = profileByTeacherId.get(t.getId());
                         String status = "NO_ACCOUNT";
                         Long userId = null;
-                        if (profileOpt.isPresent()) {
-                            var appUser = profileOpt.get().getUser();
-                            status = appUser.getStatus().name();
-                            userId = appUser.getId();
+                        if (profile != null) {
+                            status = profile.getUser().getStatus().name();
+                            userId = profile.getUser().getId();
                         }
                         return new TeacherSummary(t.getId(), t.getSurname(), t.getOtherNames(),
                                 t.getEmail(), status, userId);
