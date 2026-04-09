@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to BetaSchool</title>
+    <style>
+        body { margin:0; padding:0; background:#f4f6f9; font-family:'Segoe UI',Helvetica,Arial,sans-serif; color:#1a1a2e; }
+        .wrapper { max-width:600px; margin:40px auto; background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 4px 24px rgba(0,0,0,0.08); }
+        .header { background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%); padding:40px; text-align:center; }
+        .logo { font-size:30px; font-weight:800; color:#fff; letter-spacing:-0.5px; }
+        .logo span { color:#4f8ef7; }
+        .header p { color:#8ab4f8; font-size:13px; margin:6px 0 0; }
+        .body { padding:40px; }
+        .body h1 { font-size:22px; font-weight:700; margin:0 0 10px; }
+        .body p { font-size:15px; line-height:1.7; color:#4a5568; margin:0 0 20px; }
+        .school-card { background:#f0f4ff; border:1px solid #c7d8fd; border-radius:8px; padding:16px 20px; margin:0 0 24px; }
+        .school-card .name { font-size:18px; font-weight:700; color:#1a1a2e; }
+        .school-card .email { font-size:13px; color:#4a5568; margin-top:4px; }
+        .btn-wrap { text-align:center; margin:28px 0; }
+        .btn { display:inline-block; padding:14px 40px; background:#4f8ef7; color:#fff !important;
+               text-decoration:none; border-radius:8px; font-size:15px; font-weight:600; }
+        .note { background:#fffbeb; border:1px solid #fcd34d; border-radius:8px;
+                padding:12px 16px; font-size:13px; color:#92400e; margin:0 0 24px; }
+        .footer { background:#f8fafc; border-top:1px solid #e2e8f0; padding:24px 40px;
+                  text-align:center; font-size:12px; color:#a0aec0; line-height:1.6; }
+    </style>
+</head>
+<body>
+<div class="wrapper">
+    <div class="header">
+        <div class="logo"><span>Beta</span>School</div>
+        <p>School management platform</p>
+    </div>
+    <div class="body">
+        <h1>Welcome, <span th:text="${adminName}"></span>!</h1>
+        <p>Your school has been successfully registered on BetaSchool. You can now log in and
+            start setting up your academic sessions, classes, teachers, and students.</p>
+
+        <div class="school-card">
+            <div class="name" th:text="${schoolName}"></div>
+            <div class="email">Admin account: <strong th:text="${email}"></strong></div>
+        </div>
+
+        <div class="note">
+            Use the email address above and the password you set during registration to log in.
+            We recommend changing your password after your first login.
+        </div>
+
+        <div class="btn-wrap">
+            <a th:href="${loginUrl}" class="btn">Go to login</a>
+        </div>
+
+        <p style="font-size:13px;color:#718096;">
+            If the button above does not work, copy and paste this URL into your browser:<br/>
+            <a th:href="${loginUrl}" th:text="${loginUrl}" style="color:#4f8ef7;"></a>
+        </p>
+    </div>
+    <div class="footer">
+        <p>You're receiving this email because you registered <strong th:text="${schoolName}"></strong>
+            on BetaSchool.</p>
+        <p>If you did not create this account, please contact support immediately.</p>
+    </div>
+</div>
+</body>
+</html>

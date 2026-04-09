@@ -3,15 +3,25 @@ package com.betaschool.auth.handler;
 import com.betaschool.auth.command.AuthCommand.*;
 import com.betaschool.auth.jwt.JwtService;
 import com.betaschool.auth.jwt.JwtService.TokenClaims;
-import com.betaschool.infrastructure.mail.EmailService;
-import com.betaschool.infrastructure.persistence.entity.SchoolScoreConfigEntity;
-import com.betaschool.infrastructure.persistence.entity.auth.*;
+import com.betaschool.infrastructure.persistence.entity.auth.AppUserEntity;
 import com.betaschool.infrastructure.persistence.entity.auth.AppUserEntity.UserRole;
 import com.betaschool.infrastructure.persistence.entity.auth.AppUserEntity.UserStatus;
+import com.betaschool.infrastructure.persistence.entity.auth.SchoolAuditLogEntity;
+import com.betaschool.infrastructure.persistence.entity.auth.SchoolEntity;
 import com.betaschool.infrastructure.persistence.entity.auth.SchoolEntity.SchoolStatus;
+import com.betaschool.infrastructure.persistence.entity.auth.UserAuditLogEntity;
+import com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity;
 import com.betaschool.infrastructure.persistence.entity.auth.UserProfileEntity.ProfileType;
+import com.betaschool.infrastructure.persistence.repository.auth.JpaAppUserRepository;
+import com.betaschool.infrastructure.persistence.repository.auth.JpaSchoolAuditLogRepository;
+import com.betaschool.infrastructure.persistence.repository.auth.JpaSchoolRepository;
+import com.betaschool.infrastructure.persistence.repository.auth.JpaUserAuditLogRepository;
+import com.betaschool.infrastructure.persistence.repository.auth.JpaUserProfileRepository;
+import com.betaschool.infrastructure.persistence.entity.SchoolScoreConfigEntity;
 import com.betaschool.infrastructure.persistence.repository.JpaSchoolScoreConfigRepository;
-import com.betaschool.infrastructure.persistence.repository.auth.*;
+import com.betaschool.infrastructure.persistence.entity.auth.PasswordResetTokenEntity;
+import com.betaschool.infrastructure.persistence.repository.auth.JpaPasswordResetTokenRepository;
+import com.betaschool.infrastructure.mail.EmailService;
 import com.betaschool.shared.CommandHandler;
 import com.betaschool.shared.exception.BusinessRuleViolationException;
 import com.betaschool.shared.exception.ResourceNotFoundException;
@@ -178,7 +188,7 @@ public class AuthCommandHandlers {
             AppUserEntity user = userRepo.findById(userId)
                     .orElseThrow(() -> new ResourceNotFoundException("User", userId));
 
-            if (user.getStatus() != UserStatus.ACTIVE) {
+            if (user.getStatus() != AppUserEntity.UserStatus.ACTIVE) {
                 throw new TenantAccessDeniedException("Account is not active.");
             }
 
@@ -188,7 +198,7 @@ public class AuthCommandHandlers {
             Long profileId  = userProfileRepo.findByUserId(userId)
                     .map(p -> p.getProfileId()).orElse(null);
 
-            TokenClaims tokenClaims = new TokenClaims(
+            JwtService.TokenClaims tokenClaims = new JwtService.TokenClaims(
                     userId, user.getEmail(), user.getRole().name(),
                     schoolId, schoolSlug, profileId);
 
@@ -255,6 +265,84 @@ public class AuthCommandHandlers {
             userRepo.save(admin);
 
             log.info("Registered school: id={} slug={} adminEmail={}", school.getId(), school.getSlug(), cmd.adminEmail());
+            return school.getId();
+        }
+    }
+
+    // ── Self-Service School Registration (unauthenticated) ─────────────────
+
+    /**
+     * Public-facing registration handler — no SYSTEM_ADMIN guard.
+     * Reuses the same creation logic as RegisterSchoolHandler but is triggered
+     * from the public /public/schools/register endpoint with no auth token.
+     *
+     * Sends a welcome email asynchronously via EmailService after persisting,
+     * so an SMTP failure never rolls back the registration transaction.
+     */
+    @Component
+    @RequiredArgsConstructor
+    @Transactional
+    public static class SelfRegisterSchoolHandler implements CommandHandler<SelfRegisterSchoolCommand, Long> {
+
+        private final JpaSchoolRepository schoolRepo;
+        private final JpaAppUserRepository userRepo;
+        private final JpaSchoolScoreConfigRepository scoreConfigRepo;
+        private final PasswordEncoder passwordEncoder;
+        private final com.betaschool.infrastructure.mail.EmailService emailService;
+
+        @org.springframework.beans.factory.annotation.Value("${app.mail.frontend-base-url}")
+        private String frontendBaseUrl;
+
+        @Override
+        public Long handle(SelfRegisterSchoolCommand cmd) {
+            // Uniqueness checks — same rules as admin registration
+            if (schoolRepo.existsBySlug(cmd.schoolSlug())) {
+                throw new BusinessRuleViolationException(
+                        "School slug '" + cmd.schoolSlug() + "' is already taken. Please choose a different one.");
+            }
+            if (schoolRepo.existsByEmail(cmd.schoolEmail())) {
+                throw new BusinessRuleViolationException(
+                        "A school with email '" + cmd.schoolEmail() + "' is already registered.");
+            }
+            if (userRepo.existsByEmail(cmd.adminEmail())) {
+                throw new BusinessRuleViolationException(
+                        "Email '" + cmd.adminEmail() + "' is already registered as a user account.");
+            }
+
+            // Create the school tenant
+            SchoolEntity school = SchoolEntity.builder()
+                    .name(cmd.schoolName())
+                    .slug(cmd.schoolSlug())
+                    .email(cmd.schoolEmail())
+                    .phone(cmd.schoolPhone())
+                    .address(cmd.schoolAddress())
+                    .status(SchoolStatus.ACTIVE)
+                    .activatedAt(OffsetDateTime.now())
+                    .build();
+            school = schoolRepo.save(school);
+
+            // Seed default score config
+            scoreConfigRepo.save(SchoolScoreConfigEntity.builder()
+                    .schoolId(school.getId())
+                    .build());
+
+            // Create SCHOOL_ADMIN account
+            AppUserEntity admin = AppUserEntity.builder()
+                    .school(school)
+                    .email(cmd.adminEmail())
+                    .passwordHash(passwordEncoder.encode(cmd.adminPassword()))
+                    .role(UserRole.SCHOOL_ADMIN)
+                    .status(UserStatus.ACTIVE)
+                    .build();
+            userRepo.save(admin);
+
+            // Fire welcome email async — runs after transaction commits, never blocks it
+            String adminName = cmd.adminFirstName() + " " + cmd.adminLastName();
+            String loginUrl  = frontendBaseUrl + "/login";
+            emailService.sendWelcomeEmail(cmd.adminEmail(), adminName, cmd.schoolName(), loginUrl);
+
+            log.info("Self-registered school: id={} slug={} adminEmail={}",
+                    school.getId(), cmd.schoolSlug(), cmd.adminEmail());
             return school.getId();
         }
     }
@@ -439,8 +527,8 @@ public class AuthCommandHandlers {
                 if (cmd.profileId() == null) {
                     throw new BusinessRuleViolationException(
                             "profileId is required when creating a " + role + " account. "
-                            + "Create the " + role.name().toLowerCase() + " record first "
-                            + "(POST /teachers or POST /students), then pass the returned id as profileId.");
+                                    + "Create the " + role.name().toLowerCase() + " record first "
+                                    + "(POST /teachers or POST /students), then pass the returned id as profileId.");
                 }
                 ProfileType profileType = role == UserRole.STUDENT
                         ? ProfileType.STUDENT : ProfileType.TEACHER;
@@ -639,8 +727,8 @@ public class AuthCommandHandlers {
             if (!resetToken.isValid()) {
                 throw new BusinessRuleViolationException(
                         resetToken.isExpired()
-                            ? "This password reset link has expired. Please request a new one."
-                            : "This password reset link has already been used.");
+                                ? "This password reset link has expired. Please request a new one."
+                                : "This password reset link has already been used.");
             }
 
             AppUserEntity user = resetToken.getUser();

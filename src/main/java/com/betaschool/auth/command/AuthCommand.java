@@ -38,6 +38,24 @@ public sealed interface AuthCommand {
             @NotBlank String adminOtherNames
     ) implements Command<Long>, AuthCommand {}
 
+    /**
+     * Public self-registration — no authentication required.
+     * Separate command from RegisterSchoolCommand so the SYSTEM_ADMIN guard
+     * on that handler is never touched. adminFirstName/LastName map to
+     * adminSurname/adminOtherNames internally.
+     */
+    record SelfRegisterSchoolCommand(
+            @NotBlank String schoolName,
+            @NotBlank String schoolSlug,
+            @Email @NotBlank String schoolEmail,
+            String schoolPhone,
+            String schoolAddress,
+            @NotBlank String adminFirstName,
+            @NotBlank String adminLastName,
+            @Email @NotBlank String adminEmail,
+            @NotBlank @Size(min = 8) String adminPassword
+    ) implements Command<Long>, AuthCommand {}
+
     // ── School Status Management (system admin only) ──────────────
 
     record SuspendSchoolCommand(

@@ -11,6 +11,7 @@ import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Service;
 import org.thymeleaf.TemplateEngine;
 import org.thymeleaf.context.Context;
 
@@ -35,6 +36,13 @@ public interface EmailService {
     void sendPasswordResetEmail(String toEmail, String schoolName,
                                 String resetLink, int expiryMins);
 
+    /**
+     * Sent immediately after a school self-registers.
+     * Confirms their credentials and links them straight to the login page.
+     */
+    void sendWelcomeEmail(String toAdminEmail, String adminName,
+                          String schoolName, String loginUrl);
+
     // ── Live SMTP implementation (active when JavaMailSender bean exists) ─
 
     @Component
@@ -57,6 +65,20 @@ public interface EmailService {
             this.fromAddress    = fromAddress;
             this.fromName       = fromName;
             log.info("Email service: LIVE mode (SMTP via {})", fromAddress);
+        }
+
+        @Override
+        @Async
+        public void sendWelcomeEmail(String toAdminEmail, String adminName,
+                                     String schoolName, String loginUrl) {
+            Context ctx = new Context(Locale.ENGLISH);
+            ctx.setVariables(Map.of(
+                    "adminName",  adminName,
+                    "schoolName", schoolName,
+                    "loginUrl",   loginUrl,
+                    "email",      toAdminEmail));
+            send(toAdminEmail, "Welcome to BetaSchool — " + schoolName + " is ready",
+                    "email/welcome-school", ctx);
         }
 
         @Override
@@ -103,6 +125,13 @@ public interface EmailService {
             log.warn("Email service: NO-OP mode — MAIL_USERNAME not configured. "
                     + "Password reset links will be logged to stdout only. "
                     + "Set MAIL_HOST, MAIL_USERNAME, MAIL_PASSWORD in production.");
+        }
+
+        @Override
+        public void sendWelcomeEmail(String toAdminEmail, String adminName,
+                                     String schoolName, String loginUrl) {
+            log.warn("[NO-OP EMAIL] Welcome email for {} ({}) | login: {}",
+                    schoolName, toAdminEmail, loginUrl);
         }
 
         @Override

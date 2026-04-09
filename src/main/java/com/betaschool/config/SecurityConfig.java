@@ -35,6 +35,7 @@ public class SecurityConfig {
             "/auth/forgot-password", // unauthenticated — user has lost their password
             "/auth/reset-password",
             "/actuator/health", "/actuator/info",
+            "/public/**",
             "/error"  // Always permit /error — prevents security filter loop on exceptions
     };
 
