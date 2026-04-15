@@ -30,8 +30,8 @@ public class AsyncJobFileEntity {
      * Raw file bytes. For a small school (200 students × ~50 KB per PDF = ~10 MB)
      * this fits comfortably in PostgreSQL BYTEA. Replace with S3 key for larger scale.
      */
-    @Lob
-    @Column(name = "content", nullable = false)
+    //@Lob
+    @Column(name = "content", nullable = false, columnDefinition = "bytea")
     private byte[] content;
 
     @CreationTimestamp
