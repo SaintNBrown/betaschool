@@ -115,6 +115,9 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET, "/schools/config/score").hasAnyRole("SCHOOL_ADMIN", "TEACHER", "STUDENT")
                         .requestMatchers("/schools/**").hasAnyRole("SCHOOL_ADMIN", "SYSTEM_ADMIN")
 
+                        // ── Async jobs — SCHOOL_ADMIN + SYSTEM_ADMIN only
+                        .requestMatchers("/jobs/**").hasAnyRole("SCHOOL_ADMIN", "SYSTEM_ADMIN")
+
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
