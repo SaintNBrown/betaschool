@@ -65,4 +65,23 @@ public interface JpaTimetableSlotRepository extends JpaRepository<TimetableSlotE
             @Param("endTime")                java.time.LocalTime endTime,
             @Param("excludeClassSessionId")  Long excludeClassSessionId,
             @Param("schoolId")               Long schoolId);
+
+    /**
+     * All timetable slots for a school (active timetables only) with the chain
+     * needed for timetables.csv: slot → timetable → classSession → clazz,
+     * and classSubject → subject when slotType = SUBJECT.
+     * Ordered for deterministic CSV output.
+     */
+    @Query("""        
+        SELECT s FROM TimetableSlotEntity s
+        JOIN FETCH s.timetable tt
+        JOIN FETCH tt.classSession cs
+        JOIN FETCH cs.clazz cl
+        LEFT JOIN FETCH s.classSubject csubj
+        LEFT JOIN FETCH csubj.subject subj
+        WHERE s.schoolId = :schoolId
+          AND tt.active = true
+        ORDER BY cl.name, s.dayOfWeek, s.sortOrder, s.startTime
+        """)
+    List<TimetableSlotEntity> findAllActiveForExport(@Param("schoolId") Long schoolId);
 }

@@ -149,6 +149,12 @@
             <scope>test</scope>
         </dependency>
 
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-csv</artifactId>
+            <version>1.10.0</version>
+        </dependency>
+
         <!-- iText 8 PDF generation for bulk report card async jobs -->
         <dependency>
             <groupId>com.itextpdf</groupId>

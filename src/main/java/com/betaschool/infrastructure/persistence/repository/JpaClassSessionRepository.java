@@ -16,6 +16,14 @@ public interface JpaClassSessionRepository extends JpaRepository<ClassSessionEnt
     boolean existsByClazzIdAndSessionIdAndSchoolId(Long classId, Long sessionId, Long schoolId);
     Optional<ClassSessionEntity> findByIdAndSchoolId(Long id, Long schoolId);
 
+    /** All class-sessions for a school with class + session pre-loaded. Used by data export. */
+    @Query("SELECT cs FROM ClassSessionEntity cs " +
+           "JOIN FETCH cs.clazz " +
+           "JOIN FETCH cs.session " +
+           "WHERE cs.schoolId = :schoolId")
+    List<ClassSessionEntity> findAllBySchoolIdWithDetails(
+            @Param("schoolId") Long schoolId);
+
     @Query("SELECT cs FROM ClassSessionEntity cs " +
            "JOIN FETCH cs.clazz " +
            "JOIN FETCH cs.session " +

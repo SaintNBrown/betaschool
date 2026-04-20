@@ -94,4 +94,24 @@ public interface JpaResultRepository extends JpaRepository<ResultEntity, Long> {
             @Param("termId") Long termId,
             @Param("classSessionId") Long classSessionId,
             @Param("schoolId") Long schoolId);
+
+    /**
+     * All results for a school with the full chain needed for exam_results.csv:
+     * result → examination → term → classSession → clazz/session, classSubject → subject.
+     * One query — no N+1. Used exclusively by the data export endpoint.
+     */
+    @Query("""        
+        SELECT r FROM ResultEntity r
+        JOIN FETCH r.student st
+        JOIN FETCH r.examination e
+        JOIN FETCH e.term t
+        JOIN FETCH t.classSession cs
+        JOIN FETCH cs.clazz cl
+        JOIN FETCH cs.session sess
+        JOIN FETCH e.classSubject csub
+        JOIN FETCH csub.subject sub
+        WHERE r.schoolId = :schoolId
+        ORDER BY sess.sessionName, t.termNumber, cl.name, st.surname, st.otherNames
+        """)
+    List<ResultEntity> findAllForExport(@Param("schoolId") Long schoolId);
 }

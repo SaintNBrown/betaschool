@@ -28,4 +28,17 @@ public interface JpaTestScoreRepository extends JpaRepository<TestScoreEntity, L
     List<TestScoreEntity> findAllByExaminationIdAndSchoolId(
             @Param("examinationId") Long examinationId,
             @Param("schoolId") Long schoolId);
+
+    /**
+     * All CA/test scores for a school as a flat list.
+     * Used by the export — caller builds a Map<(examinationId,studentId)->score>
+     * in memory, then joins to ResultEntity rows. Two queries, no N+1.
+     */
+    @Query("""        
+        SELECT ts FROM TestScoreEntity ts
+        JOIN FETCH ts.student
+        JOIN FETCH ts.examination
+        WHERE ts.schoolId = :schoolId
+        """)
+    List<TestScoreEntity> findAllForExport(@Param("schoolId") Long schoolId);
 }
