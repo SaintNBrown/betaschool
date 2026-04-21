@@ -91,6 +91,11 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST,   "/examinations").hasAnyRole("SCHOOL_ADMIN", "SYSTEM_ADMIN")
                         // Results submission: TEACHER or admin
                         // FIXED: replaced "/examinations/*/results/**" — use broad matcher
+                        // Import endpoints — SCHOOL_ADMIN only (teachers must not bulk-import)
+                        .requestMatchers(HttpMethod.POST, "/examinations/*/scores/import")
+                        .hasAnyRole("SCHOOL_ADMIN", "SYSTEM_ADMIN")
+                        .requestMatchers(HttpMethod.GET, "/examinations/scores/import/template")
+                        .hasAnyRole("SCHOOL_ADMIN", "SYSTEM_ADMIN")
                         .requestMatchers("/examinations/**").hasAnyRole("TEACHER", "SCHOOL_ADMIN", "SYSTEM_ADMIN")
 
                         // ── Timetables ────────────────────────────────────────────

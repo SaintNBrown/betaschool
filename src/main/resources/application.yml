@@ -2,6 +2,11 @@ spring:
   application:
     name: betaschool-backend
 
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 6MB
+
   datasource:
     url: ${JDBC_DATABASE_URL:jdbc:postgresql://localhost:5432/betaschool}
     username: ${DB_USERNAME:betaschool}

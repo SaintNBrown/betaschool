@@ -3,10 +3,14 @@ package com.betaschool.api.controller;
 import com.betaschool.api.dto.request.CreateStudentRequest;
 import com.betaschool.api.dto.response.ApiResponse;
 import com.betaschool.command.model.StudentCommand.*;
+import com.betaschool.infrastructure.excel.ImportResult;
+import com.betaschool.infrastructure.excel.StudentImportService;
 import com.betaschool.query.model.StudentQuery.*;
 import com.betaschool.query.model.StudentQueryResult.*;
 import com.betaschool.shared.CommandBus;
 import com.betaschool.shared.QueryBus;
+import com.betaschool.tenant.context.TenantContext;
+import com.betaschool.tenant.context.TenantGuard;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -14,9 +18,12 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.web.PageableDefault;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -28,6 +35,8 @@ public class StudentController {
 
     private final CommandBus commandBus;
     private final QueryBus queryBus;
+    private final StudentImportService importService;
+    private final TenantGuard tenantGuard;
 
     @PostMapping
     @Operation(summary = "Register a new student")
@@ -120,5 +129,47 @@ public class StudentController {
             @PathVariable Long classSubjectId) {
         return ResponseEntity.ok(ApiResponse.ok(
                 queryBus.dispatch(new GetStudentsByClassSubjectQuery(classSubjectId))));
+    }
+
+    // ── Import endpoints ──────────────────────────────────────────────────
+
+    @PostMapping(value = "/import", consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "[SCHOOL_ADMIN] Import students from an .xlsx file",
+            description = """
+                   Accepts a .xlsx file with columns: Surname | Other Names | Email (optional).
+                   Row 1 must be the header. Maximum 500 data rows, 5 MB file size.
+                   Valid rows are committed; invalid rows are reported without failing the batch.
+                   Returns a full ImportResult with per-row error details.
+                   """)
+    public ResponseEntity<ApiResponse<ImportResult>> importStudents(
+            @RequestParam("file") MultipartFile file) {
+        tenantGuard.requireRole("SCHOOL_ADMIN", "SYSTEM_ADMIN");
+        Long schoolId = TenantContext.getSchoolId();
+        try {
+            ImportResult result = importService.importStudents(file, schoolId);
+            return ResponseEntity.ok(ApiResponse.ok(result));
+        } catch (IllegalArgumentException e) {
+            // File-level validation errors (size, format, too many rows)
+            return ResponseEntity.badRequest()
+                    .body(ApiResponse.<ImportResult>builder()
+                            .success(false)
+                            .message(e.getMessage())
+                            .timestamp(java.time.OffsetDateTime.now())
+                            .build());
+        } catch (Exception e) {
+            throw new RuntimeException("Student import failed: " + e.getMessage(), e);
+        }
+    }
+
+    @GetMapping("/import/template")
+    @Operation(summary = "[SCHOOL_ADMIN] Download the .xlsx template for student import")
+    public ResponseEntity<byte[]> studentImportTemplate() {
+        byte[] bytes = importService.buildTemplate();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"students-import-template.xlsx\"")
+                .contentType(MediaType.parseMediaType(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .body(bytes);
     }
 }

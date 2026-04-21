@@ -5,21 +5,28 @@ import com.betaschool.api.dto.request.CreateExaminationRequest;
 import com.betaschool.api.dto.request.RecordResultRequest;
 import com.betaschool.api.dto.response.ApiResponse;
 import com.betaschool.command.model.ExaminationCommand.*;
+import com.betaschool.infrastructure.excel.ImportResult;
+import com.betaschool.infrastructure.excel.ScoreImportService;
 import com.betaschool.query.model.AcademicQuery;
 import com.betaschool.query.model.AcademicQuery.GetExaminationsByTermQuery;
 import com.betaschool.query.model.AcademicQueryResult;
 import com.betaschool.query.model.AcademicQueryResult.ExaminationSummary;
 import com.betaschool.shared.CommandBus;
 import com.betaschool.shared.QueryBus;
+import com.betaschool.tenant.context.TenantContext;
+import com.betaschool.tenant.context.TenantGuard;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -35,6 +42,8 @@ public class ExaminationController {
 
     private final CommandBus commandBus;
     private final QueryBus queryBus;
+    private final ScoreImportService scoreImportService;
+    private final TenantGuard tenantGuard;
 
     // ── Examinations ───────────────────────────────────────────────────────
 
@@ -136,6 +145,53 @@ public class ExaminationController {
             @Valid @RequestBody UpdateTestScoreRequest req) {
         commandBus.dispatch(new UpdateTestScoreCommand(testScoreId, req.score(), req.notes()));
         return ResponseEntity.ok(ApiResponse.noContent("Test score updated"));
+    }
+
+    // ── Score import endpoints ────────────────────────────────────────────
+
+    @PostMapping(value = "/{examinationId}/scores/import",
+            consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "[SCHOOL_ADMIN] Import exam or CA scores from .xlsx",
+            description = """
+                   Accepts a .xlsx file with columns: Student Email | Score.
+                   Query param scoreType=EXAM imports exam component scores (ResultEntity).
+                   Query param scoreType=CA imports continuous assessment scores (TestScoreEntity).
+                   Upserts: existing records for the same student are updated; new rows are created.
+                   Maximum 500 rows, 5 MB file size.
+                   Returns ImportResult with per-row error details.
+                   """)
+    public ResponseEntity<ApiResponse<ImportResult>> importScores(
+            @PathVariable Long examinationId,
+            @RequestParam ScoreImportService.ScoreType scoreType,
+            @RequestParam("file") MultipartFile file) {
+        tenantGuard.requireRole("SCHOOL_ADMIN", "SYSTEM_ADMIN");
+        Long schoolId = TenantContext.getSchoolId();
+        try {
+            ImportResult result = scoreImportService.importScores(
+                    file, examinationId, scoreType, schoolId);
+            return ResponseEntity.ok(ApiResponse.ok(result));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest()
+                    .body(ApiResponse.<ImportResult>builder()
+                            .success(false)
+                            .message(e.getMessage())
+                            .timestamp(java.time.OffsetDateTime.now())
+                            .build());
+        } catch (Exception e) {
+            throw new RuntimeException("Score import failed: " + e.getMessage(), e);
+        }
+    }
+
+    @GetMapping("/scores/import/template")
+    @Operation(summary = "[SCHOOL_ADMIN] Download the .xlsx template for score import")
+    public ResponseEntity<byte[]> scoreImportTemplate() {
+        byte[] bytes = scoreImportService.buildTemplate();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"scores-import-template.xlsx\"")
+                .contentType(MediaType.parseMediaType(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .body(bytes);
     }
 
     // ── Request records ────────────────────────────────────────────────────
