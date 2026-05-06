@@ -5,12 +5,14 @@ import com.betaschool.api.dto.request.CreateExaminationRequest;
 import com.betaschool.api.dto.request.RecordResultRequest;
 import com.betaschool.api.dto.response.ApiResponse;
 import com.betaschool.command.model.ExaminationCommand.*;
+import com.betaschool.infrastructure.excel.CaScoreImportService;
 import com.betaschool.infrastructure.excel.ImportResult;
 import com.betaschool.infrastructure.excel.ScoreImportService;
-import com.betaschool.query.model.AcademicQuery;
+import com.betaschool.infrastructure.excel.ScoreImportService.ScoreType;
 import com.betaschool.query.model.AcademicQuery.GetExaminationsByTermQuery;
-import com.betaschool.query.model.AcademicQueryResult;
+import com.betaschool.query.model.AcademicQuery.GetExistingScoresQuery;
 import com.betaschool.query.model.AcademicQueryResult.ExaminationSummary;
+import com.betaschool.query.model.AcademicQueryResult.ExistingScores;
 import com.betaschool.shared.CommandBus;
 import com.betaschool.shared.QueryBus;
 import com.betaschool.tenant.context.TenantContext;
@@ -42,8 +44,9 @@ public class ExaminationController {
 
     private final CommandBus commandBus;
     private final QueryBus queryBus;
-    private final ScoreImportService scoreImportService;
-    private final TenantGuard tenantGuard;
+    private final ScoreImportService    scoreImportService;
+    private final CaScoreImportService  caScoreImportService;
+    private final TenantGuard           tenantGuard;
 
     // ── Examinations ───────────────────────────────────────────────────────
 
@@ -76,10 +79,10 @@ public class ExaminationController {
 
     @GetMapping("/{examinationId}/scores")
     @Operation(summary = "Get all already-recorded exam and CA scores for an examination",
-            description = "Returns maps of studentId → score for both exam results and CA/test scores. " +
-                    "Use this when opening the result entry modal to pre-populate existing scores.")
-    public ResponseEntity<ApiResponse<AcademicQueryResult.ExistingScores>> getExistingScores(@PathVariable Long examinationId) {
-        return ResponseEntity.ok(ApiResponse.ok(queryBus.dispatch(new AcademicQuery.GetExistingScoresQuery(examinationId))));
+               description = "Returns maps of studentId → score for both exam results and CA/test scores. " +
+                             "Use this when opening the result entry modal to pre-populate existing scores.")
+    public ResponseEntity<ApiResponse<ExistingScores>> getExistingScores(@PathVariable Long examinationId) {
+        return ResponseEntity.ok(ApiResponse.ok(queryBus.dispatch(new GetExistingScoresQuery(examinationId))));
     }
 
     // ── Exam Results ───────────────────────────────────────────────────────
@@ -147,12 +150,23 @@ public class ExaminationController {
         return ResponseEntity.ok(ApiResponse.noContent("Test score updated"));
     }
 
+    // ── Request records ────────────────────────────────────────────────────
+
+    public record UpdateExaminationRequest(
+            LocalDate examDate, LocalTime examStartTime,
+            Integer durationMinutes, BigDecimal testMaxScore, BigDecimal examMaxScore) {}
+
+    public record RecordTestScoreRequest(
+            @NotNull Long studentId,
+            @NotNull @DecimalMin("0") BigDecimal score,
+            String notes) {}
+
     // ── Score import endpoints ────────────────────────────────────────────
 
     @PostMapping(value = "/{examinationId}/scores/import",
-            consumes = org.springframework.http.MediaType.MULTIPART_FORM_DATA_VALUE)
+                 consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(summary = "[SCHOOL_ADMIN] Import exam or CA scores from .xlsx",
-            description = """
+               description = """
                    Accepts a .xlsx file with columns: Student Email | Score.
                    Query param scoreType=EXAM imports exam component scores (ResultEntity).
                    Query param scoreType=CA imports continuous assessment scores (TestScoreEntity).
@@ -162,7 +176,7 @@ public class ExaminationController {
                    """)
     public ResponseEntity<ApiResponse<ImportResult>> importScores(
             @PathVariable Long examinationId,
-            @RequestParam ScoreImportService.ScoreType scoreType,
+            @RequestParam ScoreType scoreType,
             @RequestParam("file") MultipartFile file) {
         tenantGuard.requireRole("SCHOOL_ADMIN", "SYSTEM_ADMIN");
         Long schoolId = TenantContext.getSchoolId();
@@ -194,16 +208,80 @@ public class ExaminationController {
                 .body(bytes);
     }
 
-    // ── Request records ────────────────────────────────────────────────────
+    // ── CA multi-component import ─────────────────────────────────────────
 
-    public record UpdateExaminationRequest(
-            LocalDate examDate, LocalTime examStartTime,
-            Integer durationMinutes, BigDecimal testMaxScore, BigDecimal examMaxScore) {}
+    @PostMapping(value = "/scores/import/ca",
+                 consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(
+        summary = "[SCHOOL_ADMIN | TEACHER] Import CA scores from a multi-component .xlsx file",
+        description = """
+            Accepts a .xlsx file with columns:
+              Student Email | CA1/10 | CA2/20 | CA3/10
+            (any number of CA components, each header is Label/RawMax).
 
-    public record RecordTestScoreRequest(
-            @NotNull Long studentId,
-            @NotNull @DecimalMin("0") BigDecimal score,
-            String notes) {}
+            Resolution: (sum of raw component scores / sum of raw maxima) × examination.testMaxScore
+            Rounded to 2 decimal places. Stored as a single TestScoreEntity per student.
+
+            Teachers can only import for examinations belonging to their assigned subjects.
+            School admins can import for any examination in their school.
+
+            Upserts: existing CA scores for the same student are updated; new ones are created.
+            Maximum 500 rows, 5 MB file size.
+            """)
+    public ResponseEntity<ApiResponse<ImportResult>> importCaScores(
+            @RequestParam Long examinationId,
+            @RequestParam("file") MultipartFile file) {
+        tenantGuard.requireRole("SCHOOL_ADMIN", "SYSTEM_ADMIN", "TEACHER");
+        Long schoolId = TenantContext.getSchoolId();
+        String role   = TenantContext.getUserRole();
+        Long   userId = TenantContext.getUserId();
+        try {
+            ImportResult result = caScoreImportService.importCaScores(
+                    file, examinationId, schoolId, role, userId);
+            return ResponseEntity.ok(ApiResponse.ok(result));
+        } catch (IllegalArgumentException
+                 | com.betaschool.shared.exception.BusinessRuleViolationException e) {
+            return ResponseEntity.badRequest()
+                    .body(ApiResponse.<ImportResult>builder()
+                            .success(false)
+                            .message(e.getMessage())
+                            .timestamp(java.time.OffsetDateTime.now())
+                            .build());
+        } catch (Exception e) {
+            throw new RuntimeException("CA import failed: " + e.getMessage(), e);
+        }
+    }
+
+    @GetMapping("/scores/import/ca/template")
+    @Operation(summary = "[SCHOOL_ADMIN | TEACHER] Download CA import template (.xlsx)",
+               description = """
+                   Returns a template with Student Email | CA1/10 | CA2/20 | CA3/10.
+                   Adjust the Label/Max headers to match your actual CA scheme before distributing.
+                   The school admin can customise component labels and maxima to any scheme.
+                   """)
+    public ResponseEntity<byte[]> caImportTemplate() {
+        byte[] bytes = caScoreImportService.buildCaTemplate();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"ca-scores-import-template.xlsx\"")
+                .contentType(MediaType.parseMediaType(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .body(bytes);
+    }
+
+    @GetMapping("/scores/import/exam/template")
+    @Operation(summary = "[SCHOOL_ADMIN | TEACHER] Download exam score import template (.xlsx)",
+               description = "Two-column format: Student Email | Score. "
+                           + "Score must not exceed the examination's examMaxScore.")
+    public ResponseEntity<byte[]> examImportTemplate() {
+        byte[] bytes = caScoreImportService.buildExamTemplate();
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION,
+                        "attachment; filename=\"exam-scores-import-template.xlsx\"")
+                .contentType(MediaType.parseMediaType(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .body(bytes);
+    }
 
     public record UpdateTestScoreRequest(
             @NotNull @DecimalMin("0") BigDecimal score,
@@ -216,6 +294,6 @@ public class ExaminationController {
                 @NotNull Long studentId,
                 @NotNull @DecimalMin("0") BigDecimal score,
                 String notes,
-                Long testScoreId) {}  // null → create; non-null → update existing
+                Long testScoreId) {}  // null → create new; non-null → update existing
     }
 }

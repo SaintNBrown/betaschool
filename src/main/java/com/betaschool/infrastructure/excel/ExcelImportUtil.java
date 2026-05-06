@@ -62,6 +62,11 @@ public final class ExcelImportUtil {
      * @param requiredCols  columns that must be present in the header
      * @return list of maps; each map is { headerName (lower-case) → cellValue }
      */
+    /** Overload with no required-column check — used for header inspection only. */
+    public static List<Map<String, String>> parseRows(MultipartFile file) throws IOException {
+        return parseRows(file, new String[0]);
+    }
+
     public static List<Map<String, String>> parseRows(
             MultipartFile file, String... requiredCols) throws IOException {
 
@@ -181,5 +186,69 @@ public final class ExcelImportUtil {
             }
         }
         return true;
+    }
+
+    // ── CA-specific parsing ───────────────────────────────────────────────
+
+    /**
+     * Detects CA component columns from a header row.
+     *
+     * Expected format: "CA1/10", "CA 2/20", "Mid-Term/15" etc.
+     * The part before the slash is the component label (trimmed).
+     * The part after the slash is the raw maximum for that component (integer).
+     *
+     * Columns that do not contain a slash, or whose post-slash part is not a
+     * positive integer, are silently ignored — they are treated as metadata
+     * columns (e.g. "Student Email", "Class", "Subject").
+     *
+     * @param file the uploaded .xlsx file
+     * @return ordered map of { lowerCaseLabel → rawMax }, preserving column order
+     */
+    public static LinkedHashMap<String, Integer> parseCAColumns(
+            MultipartFile file) throws IOException {
+
+        LinkedHashMap<String, Integer> result = new LinkedHashMap<>();
+
+        try (Workbook wb = new XSSFWorkbook(file.getInputStream())) {
+            Sheet sheet = wb.getSheetAt(0);
+            Row headerRow = sheet.getRow(0);
+            if (headerRow == null) return result;
+
+            for (Cell cell : headerRow) {
+                String raw = cellString(cell).trim();
+                int slash = raw.indexOf('/');
+                if (slash < 1 || slash == raw.length() - 1) continue;
+
+                String label  = raw.substring(0, slash).trim();
+                String maxStr = raw.substring(slash + 1).trim();
+                try {
+                    int max = Integer.parseInt(maxStr);
+                    if (max > 0) result.put(label.toLowerCase(), max);
+                } catch (NumberFormatException ignored) { /* not a CA column */ }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Builds a CA import template with the given component definitions.
+     * Example: caComponents = [("CA1", 10), ("CA2", 20), ("CA3", 10)]
+     * Produces headers: Student Email | CA1/10 | CA2/20 | CA3/10
+     * and one example row showing how raw scores should be entered.
+     */
+    public static byte[] buildCATemplate(
+            List<Map.Entry<String, Integer>> caComponents) {
+
+        String[] headers = new String[1 + caComponents.size()];
+        String[] example = new String[1 + caComponents.size()];
+        headers[0] = "Student Email";
+        example[0] = "student@school.edu";
+
+        for (int i = 0; i < caComponents.size(); i++) {
+            var entry = caComponents.get(i);
+            headers[i + 1] = entry.getKey() + "/" + entry.getValue();
+            example[i + 1] = String.valueOf(entry.getValue() / 2); // half-marks as example
+        }
+        return buildTemplate(headers, example);
     }
 }
