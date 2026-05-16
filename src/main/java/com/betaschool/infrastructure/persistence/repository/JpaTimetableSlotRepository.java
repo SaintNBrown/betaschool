@@ -84,4 +84,26 @@ public interface JpaTimetableSlotRepository extends JpaRepository<TimetableSlotE
         ORDER BY cl.name, s.dayOfWeek, s.sortOrder, s.startTime
         """)
     List<TimetableSlotEntity> findAllActiveForExport(@Param("schoolId") Long schoolId);
+
+    /**
+     * Loads all active SUBJECT slots for a school (excluding a given classSession)
+     * with the teacher chain pre-fetched. Used by the timetable generator to build
+     * the "teacher occupied" map before running the constraint solver — one query
+     * replaces what would otherwise be O(N×days×slots) calls.
+     */
+    @Query("""        
+        SELECT s FROM TimetableSlotEntity s
+        JOIN FETCH s.timetable tt
+        JOIN FETCH tt.classSession tcs
+        JOIN FETCH s.classSubject csubj
+        JOIN FETCH csubj.teacherAssignment ta
+        JOIN FETCH ta.teacher t
+        WHERE s.schoolId = :schoolId
+          AND tt.active = true
+          AND s.slotType = 'SUBJECT'
+          AND tcs.id <> :excludeClassSessionId
+        """)
+    List<TimetableSlotEntity> findAllActiveSubjectSlotsForSchoolExcludingClass(
+            @Param("schoolId") Long schoolId,
+            @Param("excludeClassSessionId") Long excludeClassSessionId);
 }

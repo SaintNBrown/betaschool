@@ -47,4 +47,72 @@ public sealed interface TimetableCommand {
     record DeleteTimetableVersionCommand(
             Long timetableId
     ) implements Command<Void>, TimetableCommand {}
+
+    /**
+     * Generates a complete weekly timetable for a class-session using a constraint
+     * satisfaction solver, then publishes it via the existing PublishTimetableHandler.
+     *
+     * The generator respects:
+     *  - Max 2 consecutive slots of the same subject per day
+     *  - Teacher-transition constraint: consecutive subject groups must not share a teacher
+     *  - Teacher unavailable days
+     *  - School non-operating days
+     *  - Cross-class teacher conflicts (against other active timetables)
+     *  - Activity placement with consistent position across all operating days
+     *  - Consistent subject-slot duration across all days
+     *  - Per-subject frequency (periodsPerWeek)
+     */
+    record GenerateTimetableCommand(
+            Long classSessionId,
+
+            /** Days the school operates. Omit to use MON–FRI. */
+            @NotEmpty List<String> operatingDays,
+
+            /** Duration of each subject period in minutes. */
+            @NotNull Integer slotDurationMinutes,
+
+            /** School day start time — e.g. "08:00". */
+            @NotNull LocalTime schoolStartTime,
+
+            /**
+             * Activity slots to embed in every operating day.
+             * Position is anchored by afterSlotNumber (0 = before any subject).
+             */
+            List<ActivitySpec> activities,
+
+            /** Per-teacher unavailable days. */
+            List<TeacherUnavailability> teacherUnavailableDays,
+
+            /** How many subject periods each class-subject gets per week. */
+            @NotEmpty List<SubjectFrequency> subjectFrequencies,
+
+            /** Optional note stored on the generated timetable. */
+            String notes
+    ) implements Command<Long>, TimetableCommand {
+
+        /** Defines an activity that appears at the same position every operating day. */
+        public record ActivitySpec(
+                @NotNull String label,
+                @NotNull Integer durationMinutes,
+                /**
+                 * Slot number this activity comes AFTER.
+                 * 0 = before all subject slots (i.e. first).
+                 * Use Integer.MAX_VALUE or omit for "last".
+                 * Example: afterSlotNumber=3 means after the 3rd subject slot.
+                 */
+                @NotNull Integer afterSlotNumber
+        ) {}
+
+        /** Marks a teacher as unavailable on specific days. */
+        public record TeacherUnavailability(
+                @NotNull Long teacherId,
+                @NotEmpty List<String> unavailableDays
+        ) {}
+
+        /** How many periods per week a specific class-subject should receive. */
+        public record SubjectFrequency(
+                @NotNull Long classSubjectId,
+                @NotNull Integer periodsPerWeek
+        ) {}
+    }
 }

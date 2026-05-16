@@ -1,6 +1,7 @@
 package com.betaschool.api.controller;
 
 import com.betaschool.api.dto.response.ApiResponse;
+import com.betaschool.command.model.TimetableCommand;
 import com.betaschool.command.model.TimetableCommand.DeleteTimetableVersionCommand;
 import com.betaschool.command.model.TimetableCommand.PublishTimetableCommand;
 import com.betaschool.command.model.TimetableCommand.TimetableSlotInput;
@@ -85,6 +86,37 @@ public class TimetableController {
                 queryBus.dispatch(new GetTimetableByIdQuery(timetableId))));
     }
 
+    @PostMapping("/class-sessions/{classSessionId}/generate")
+    @Operation(summary = "[SCHOOL_ADMIN] Auto-generate a weekly timetable using constraint satisfaction",
+            description = """
+                   Generates a complete weekly timetable for a class-session respecting all
+                   timetabling constraints:
+                     - Max 2 consecutive periods of the same subject
+                     - Teacher-transition: consecutive subject groups must not share a teacher
+                     - Teacher unavailable days
+                     - Cross-class teacher conflicts (checks all other active timetables)
+                     - Activity placement consistent across all operating days
+                     - Per-subject period frequency
+
+                   On success, publishes and stores the generated timetable identically to
+                   a manually entered one. Returns the new timetable ID.
+                   Fails with a 400 and clear error if constraints cannot be satisfied.
+                   """)
+    public ResponseEntity<ApiResponse<Long>> generate(
+            @PathVariable Long classSessionId,
+            @Valid @RequestBody GenerateTimetableRequest req) {
+        Long id = commandBus.dispatch(new TimetableCommand.GenerateTimetableCommand(
+                classSessionId,
+                req.operatingDays(),
+                req.slotDurationMinutes(),
+                req.schoolStartTime(),
+                req.activities(),
+                req.teacherUnavailableDays(),
+                req.subjectFrequencies(),
+                req.notes()));
+        return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.created(id));
+    }
+
     @DeleteMapping("/{timetableId}")
     @Operation(summary = "[SCHOOL_ADMIN] Delete a historical (inactive) timetable version")
     public ResponseEntity<ApiResponse<Void>> deleteVersion(
@@ -100,4 +132,14 @@ public class TimetableController {
             @jakarta.validation.constraints.NotEmpty
             @Valid
             List<TimetableSlotInput> slots) {}
+
+    public record GenerateTimetableRequest(
+            @jakarta.validation.constraints.NotEmpty List<String> operatingDays,
+            @jakarta.validation.constraints.NotNull Integer slotDurationMinutes,
+            @jakarta.validation.constraints.NotNull java.time.LocalTime schoolStartTime,
+            List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.ActivitySpec> activities,
+            List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.TeacherUnavailability> teacherUnavailableDays,
+            @jakarta.validation.constraints.NotEmpty
+            List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.SubjectFrequency> subjectFrequencies,
+            String notes) {}
 }
