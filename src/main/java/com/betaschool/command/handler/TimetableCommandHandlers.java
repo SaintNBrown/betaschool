@@ -1,15 +1,10 @@
 package com.betaschool.command.handler;
 
-import com.betaschool.command.model.TimetableCommand.DeleteTimetableVersionCommand;
-import com.betaschool.command.model.TimetableCommand.PublishTimetableCommand;
-import com.betaschool.command.model.TimetableCommand.TimetableSlotInput;
+import com.betaschool.command.model.TimetableCommand.*;
 import com.betaschool.infrastructure.persistence.entity.*;
 import com.betaschool.infrastructure.persistence.entity.TimetableSlotEntity.DayOfWeek;
 import com.betaschool.infrastructure.persistence.entity.TimetableSlotEntity.SlotType;
-import com.betaschool.infrastructure.persistence.repository.JpaClassSessionRepository;
-import com.betaschool.infrastructure.persistence.repository.JpaClassSubjectRepository;
-import com.betaschool.infrastructure.persistence.repository.JpaTimetableRepository;
-import com.betaschool.infrastructure.persistence.repository.JpaTimetableSlotRepository;
+import com.betaschool.infrastructure.persistence.repository.*;
 import com.betaschool.query.model.TimetableQueryResult.TeacherConflict;
 import com.betaschool.shared.CommandHandler;
 import com.betaschool.shared.exception.BusinessRuleViolationException;
@@ -77,7 +72,7 @@ public class TimetableCommandHandlers {
                 } catch (IllegalArgumentException e) {
                     throw new BusinessRuleViolationException(
                             "Invalid day of week: '" + input.dayOfWeek()
-                            + "'. Must be one of: MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY");
+                                    + "'. Must be one of: MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY");
                 }
 
                 SlotType slotType;
@@ -86,14 +81,14 @@ public class TimetableCommandHandlers {
                 } catch (IllegalArgumentException e) {
                     throw new BusinessRuleViolationException(
                             "Invalid slot type: '" + input.slotType()
-                            + "'. Must be SUBJECT or ACTIVITY");
+                                    + "'. Must be SUBJECT or ACTIVITY");
                 }
 
                 // Time ordering
                 if (!input.endTime().isAfter(input.startTime())) {
                     throw new BusinessRuleViolationException(
                             "Slot end time must be after start time (got "
-                            + input.startTime() + " - " + input.endTime() + ")");
+                                    + input.startTime() + " - " + input.endTime() + ")");
                 }
 
                 ClassSubjectEntity classSubject = null;
@@ -112,7 +107,7 @@ public class TimetableCommandHandlers {
                     if (!classSubject.getClassSession().getId().equals(cmd.classSessionId())) {
                         throw new BusinessRuleViolationException(
                                 "ClassSubject id=" + input.classSubjectId()
-                                + " does not belong to class-session id=" + cmd.classSessionId());
+                                        + " does not belong to class-session id=" + cmd.classSessionId());
                     }
                 } else {
                     // ACTIVITY
@@ -147,14 +142,14 @@ public class TimetableCommandHandlers {
                 String detail = teacherConflicts.stream()
                         .map(c -> String.format(
                                 "Teacher conflict: %s is already scheduled in %s at %s %s–%s " +
-                                "(subject: %s conflicts with %s)",
+                                        "(subject: %s conflicts with %s)",
                                 c.teacherName(), c.conflictingClassName(), c.dayOfWeek(),
                                 c.conflictingStart(), c.conflictingEnd(),
                                 c.subjectBeingPublished(), c.subjectAlreadyScheduled()))
                         .collect(Collectors.joining("\n"));
                 throw new BusinessRuleViolationException(
                         "Timetable has " + teacherConflicts.size()
-                        + " teacher conflict(s):\n" + detail);
+                                + " teacher conflict(s):\n" + detail);
             }
 
             // ── Deactivate current active timetable ──────────────────────────
@@ -262,9 +257,9 @@ public class TimetableCommandHandlers {
                     if (currentEnd.isAfter(nextStart)) {
                         throw new BusinessRuleViolationException(
                                 "Overlapping slots on " + day + ": "
-                                + daySlots.get(i).getStartTime() + "-" + currentEnd
-                                + " overlaps with "
-                                + nextStart + "-" + daySlots.get(i + 1).getEndTime());
+                                        + daySlots.get(i).getStartTime() + "-" + currentEnd
+                                        + " overlaps with "
+                                        + nextStart + "-" + daySlots.get(i + 1).getEndTime());
                     }
                 }
             }
