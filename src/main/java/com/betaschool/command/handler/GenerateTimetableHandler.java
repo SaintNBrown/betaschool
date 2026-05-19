@@ -120,14 +120,40 @@ public class GenerateTimetableHandler
                 loadOccupiedIntervals(schoolId, cmd.classSessionId());
 
         // ── Phase 1: assign each occurrence to a day ──────────────────────
+        // For periodsPerWeek=2 subjects marked as FLEXIBLE, try as double first.
+        // If that fails, expand them to 2 singles and retry.
         Map<DayOfWeek, List<Occurrence>> dayAssignment = null;
         Random rng = new Random();
 
+        // First attempt: flexible occurrences as doubles
         for (int attempt = 0; attempt < MAX_PHASE1_ATTEMPTS && dayAssignment == null;
              attempt++) {
             dayAssignment = phase1DayAssign(
                     occurrences, operatingDays, slotsPerDay,
                     unavailable, occupied, template, rng);
+        }
+
+        // If still null and there are flexible occurrences, expand them to 2 singles
+        if (dayAssignment == null) {
+            List<Occurrence> expanded = new ArrayList<>();
+            for (Occurrence o : occurrences) {
+                if (o.isFlexible()) {
+                    // Replace 1 flexible-double with 2 singles on different days
+                    expanded.add(new Occurrence(o.classSubjectId(), o.teacherId(), false, false));
+                    expanded.add(new Occurrence(o.classSubjectId(), o.teacherId(), false, false));
+                } else {
+                    expanded.add(o);
+                }
+            }
+
+            // Re-validate spread feasibility after expansion
+            // (2 singles need 2 different days per subject — check coverage)
+            for (int attempt = 0; attempt < MAX_PHASE1_ATTEMPTS && dayAssignment == null;
+                 attempt++) {
+                dayAssignment = phase1DayAssign(
+                        expanded, operatingDays, slotsPerDay,
+                        unavailable, occupied, template, rng);
+            }
         }
 
         if (dayAssignment == null) {
@@ -460,6 +486,8 @@ public class GenerateTimetableHandler
 
         List<Occurrence> all = new ArrayList<>();
 
+        Set<Long> coveredIds = new HashSet<>();
+
         for (var freq : frequencies) {
             Long csId = freq.classSubjectId();
             if (!subjectById.containsKey(csId))
@@ -469,7 +497,7 @@ public class GenerateTimetableHandler
             int periods = freq.periodsPerWeek();
             if (periods < 1)
                 throw new BusinessRuleViolationException(
-                        "periodsPerWeek must be ≥ 1 for classSubjectId=" + csId);
+                        "periodsPerWeek must be \u2265 1 for classSubjectId=" + csId);
 
             ClassSubjectEntity cs = subjectById.get(csId);
             Long teacherId = getTeacherId(cs);
@@ -484,7 +512,29 @@ public class GenerateTimetableHandler
                                 + "Reduce periodsPerWeek or add more operating days.");
 
             all.addAll(occs);
+            coveredIds.add(csId);
         }
+
+        // Validate completeness: every class-subject in this class must be
+        // listed in subjectFrequencies. Any omission means the timetable will
+        // be generated without that subject — which is always a mistake.
+        List<String> omitted = subjectById.values().stream()
+                .filter(cs -> !coveredIds.contains(cs.getId()))
+                .map(cs -> {
+                    String name = cs.getSubject() != null
+                            ? cs.getSubject().getName()
+                            : "id=" + cs.getId();
+                    return "'" + name + "' (classSubjectId=" + cs.getId() + ")";
+                })
+                .collect(java.util.stream.Collectors.toList());
+
+        if (!omitted.isEmpty()) {
+            throw new BusinessRuleViolationException(
+                    "The following subjects in this class are missing from subjectFrequencies "
+                            + "and would be omitted from the timetable. Add them with a periodsPerWeek value: "
+                            + String.join(", ", omitted));
+        }
+
         return all;
     }
 
