@@ -90,17 +90,30 @@ public sealed interface TimetableCommand {
             String notes
     ) implements Command<Long>, TimetableCommand {
 
-        /** Defines an activity that appears at the same position every operating day. */
+        /**
+         * Defines an activity block in the day.
+         *
+         * afterSlotNumber: position anchor.
+         *   0              = before all subject slots (first in day)
+         *   N              = after the Nth subject slot
+         *   Integer.MAX    = after all subject slots (last)
+         *
+         * onlyOnDays: optional. When null or empty the activity appears on every
+         *   operating day. When specified (e.g. ["THURSDAY"]) it only appears on
+         *   those days — all other days skip it. This supports school-specific
+         *   day patterns such as sports on Thursday mornings or vocational
+         *   activities on Friday afternoons.
+         *
+         * The subject slot COUNT is always consistent across all days regardless
+         * of which activities appear on a given day. Day-specific activities
+         * only shift the clock times of the subject slots on that day.
+         */
         public record ActivitySpec(
                 @NotNull String label,
                 @NotNull Integer durationMinutes,
-                /**
-                 * Slot number this activity comes AFTER.
-                 * 0 = before all subject slots (i.e. first).
-                 * Use Integer.MAX_VALUE or omit for "last".
-                 * Example: afterSlotNumber=3 means after the 3rd subject slot.
-                 */
-                @NotNull Integer afterSlotNumber
+                @NotNull Integer afterSlotNumber,
+                /** Null or empty = all operating days. */
+                List<String> onlyOnDays
         ) {}
 
         /** Marks a teacher as unavailable on specific days. */
@@ -109,10 +122,24 @@ public sealed interface TimetableCommand {
                 @NotEmpty List<String> unavailableDays
         ) {}
 
-        /** How many periods per week a specific class-subject should receive. */
+        /**
+         * How many periods per week a specific class-subject should receive.
+         *
+         * forceDouble: only relevant when periodsPerWeek == 2.
+         *   false (default) — the two periods are placed as two SINGLES on
+         *     different days, alternating across the week for even spread.
+         *   true  — the two periods are placed as one DOUBLE (consecutive
+         *     slots on the same day), useful for subjects that benefit from
+         *     a longer uninterrupted block (e.g. practicals, art).
+         *
+         * For periodsPerWeek >= 3 the generator always maximises doubles
+         * (max doubles, remaining singles) regardless of this flag.
+         */
         public record SubjectFrequency(
                 @NotNull Long classSubjectId,
-                @NotNull Integer periodsPerWeek
+                @NotNull Integer periodsPerWeek,
+                /** Only applies when periodsPerWeek == 2. Default false. */
+                Boolean forceDouble
         ) {}
     }
 }
