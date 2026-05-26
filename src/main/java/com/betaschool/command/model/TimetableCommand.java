@@ -87,7 +87,10 @@ public sealed interface TimetableCommand {
             @NotEmpty List<SubjectFrequency> subjectFrequencies,
 
             /** Optional note stored on the generated timetable. */
-            String notes
+            String notes,
+
+            /** Closing time for the school*/
+            LocalTime schoolClosingTime
     ) implements Command<Long>, TimetableCommand {
 
         /**
@@ -113,7 +116,8 @@ public sealed interface TimetableCommand {
                 @NotNull Integer durationMinutes,
                 @NotNull Integer afterSlotNumber,
                 /** Null or empty = all operating days. */
-                List<String> onlyOnDays
+                List<String> onlyOnDays,
+                Boolean isLastOfDay
         ) {}
 
         /** Marks a teacher as unavailable on specific days. */
