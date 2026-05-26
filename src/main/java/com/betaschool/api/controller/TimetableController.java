@@ -22,6 +22,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
 
 @RestController
@@ -113,7 +115,8 @@ public class TimetableController {
                 req.activities(),
                 req.teacherUnavailableDays(),
                 req.subjectFrequencies(),
-                req.notes()));
+                req.notes(),
+                req.schoolClosingTime()));
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.created(id));
     }
 
@@ -141,5 +144,6 @@ public class TimetableController {
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.TeacherUnavailability> teacherUnavailableDays,
             @jakarta.validation.constraints.NotEmpty
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.SubjectFrequency> subjectFrequencies,
-            String notes) {}
+            String notes,
+            LocalTime schoolClosingTime) {}
 }
