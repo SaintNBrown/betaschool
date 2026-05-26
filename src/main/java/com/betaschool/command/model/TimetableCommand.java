@@ -117,7 +117,7 @@ public sealed interface TimetableCommand {
                 @NotNull Integer afterSlotNumber,
                 /** Null or empty = all operating days. */
                 List<String> onlyOnDays,
-                Boolean isLastOfDay
+                boolean isLastOfDay
         ) {}
 
         /** Marks a teacher as unavailable on specific days. */
