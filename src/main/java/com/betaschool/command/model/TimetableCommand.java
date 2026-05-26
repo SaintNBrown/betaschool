@@ -117,6 +117,7 @@ public sealed interface TimetableCommand {
                 @NotNull Integer afterSlotNumber,
                 /** Null or empty = all operating days. */
                 List<String> onlyOnDays,
+                /** Marks an activity as the last in a day */
                 boolean isLastOfDay
         ) {}
 
