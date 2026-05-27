@@ -1,17 +1,9 @@
 package com.betaschool.api.controller;
 
 import com.betaschool.api.dto.response.ApiResponse;
-import com.betaschool.command.model.TimetableCommand;
-import com.betaschool.command.model.TimetableCommand.DeleteTimetableVersionCommand;
-import com.betaschool.command.model.TimetableCommand.PublishTimetableCommand;
-import com.betaschool.command.model.TimetableCommand.TimetableSlotInput;
-import com.betaschool.query.model.TimetableQuery.GetActiveTimetableQuery;
-import com.betaschool.query.model.TimetableQuery.GetTimetableByIdQuery;
-import com.betaschool.query.model.TimetableQuery.GetTimetableConflictsQuery;
-import com.betaschool.query.model.TimetableQuery.GetTimetableHistoryQuery;
-import com.betaschool.query.model.TimetableQueryResult.TeacherConflict;
-import com.betaschool.query.model.TimetableQueryResult.TimetableDetail;
-import com.betaschool.query.model.TimetableQueryResult.TimetableSummary;
+import com.betaschool.command.model.TimetableCommand.*;
+import com.betaschool.query.model.TimetableQuery.*;
+import com.betaschool.query.model.TimetableQueryResult.*;
 import com.betaschool.shared.CommandBus;
 import com.betaschool.shared.QueryBus;
 import io.swagger.v3.oas.annotations.Operation;
@@ -22,8 +14,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.LocalDate;
-import java.time.LocalTime;
 import java.util.List;
 
 @RestController
@@ -65,7 +55,7 @@ public class TimetableController {
 
     @GetMapping("/class-sessions/{classSessionId}/conflicts")
     @Operation(summary = "[SCHOOL_ADMIN] Check the active timetable for cross-class teacher conflicts",
-               description = """
+            description = """
                        Runs the same teacher conflict detection used during publishing, but returns
                        the list of conflicts without throwing — so the admin can review them before
                        attempting to publish an updated timetable.
@@ -107,16 +97,16 @@ public class TimetableController {
     public ResponseEntity<ApiResponse<Long>> generate(
             @PathVariable Long classSessionId,
             @Valid @RequestBody GenerateTimetableRequest req) {
-        Long id = commandBus.dispatch(new TimetableCommand.GenerateTimetableCommand(
+        Long id = commandBus.dispatch(new GenerateTimetableCommand(
                 classSessionId,
                 req.operatingDays(),
                 req.slotDurationMinutes(),
                 req.schoolStartTime(),
+                req.schoolClosingTime(),
                 req.activities(),
                 req.teacherUnavailableDays(),
                 req.subjectFrequencies(),
-                req.notes(),
-                req.schoolClosingTime()));
+                req.notes()));
         return ResponseEntity.status(HttpStatus.CREATED).body(ApiResponse.created(id));
     }
 
@@ -130,20 +120,21 @@ public class TimetableController {
 
     // ── Request body records ──────────────────────────────────────────────
 
-    public record PublishTimetableRequest(
-            String notes,
-            @jakarta.validation.constraints.NotEmpty
-            @Valid
-            List<TimetableSlotInput> slots) {}
-
     public record GenerateTimetableRequest(
             @jakarta.validation.constraints.NotEmpty List<String> operatingDays,
             @jakarta.validation.constraints.NotNull Integer slotDurationMinutes,
             @jakarta.validation.constraints.NotNull java.time.LocalTime schoolStartTime,
+            /** Optional. When provided, derives slotsPerDay from closing time. */
+            java.time.LocalTime schoolClosingTime,
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.ActivitySpec> activities,
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.TeacherUnavailability> teacherUnavailableDays,
             @jakarta.validation.constraints.NotEmpty
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.SubjectFrequency> subjectFrequencies,
+            String notes) {}
+
+    public record PublishTimetableRequest(
             String notes,
-            LocalTime schoolClosingTime) {}
+            @jakarta.validation.constraints.NotEmpty
+            @jakarta.validation.Valid
+            List<TimetableSlotInput> slots) {}
 }

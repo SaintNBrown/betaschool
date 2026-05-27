@@ -65,7 +65,7 @@ public sealed interface TimetableCommand {
     record GenerateTimetableCommand(
             Long classSessionId,
 
-            /** Days the school operates. Omit to use MON–FRI. */
+            /** Days the school operates. */
             @NotEmpty List<String> operatingDays,
 
             /** Duration of each subject period in minutes. */
@@ -75,8 +75,29 @@ public sealed interface TimetableCommand {
             @NotNull LocalTime schoolStartTime,
 
             /**
-             * Activity slots to embed in every operating day.
-             * Position is anchored by afterSlotNumber (0 = before any subject).
+             * Optional school closing time — e.g. "14:00".
+             *
+             * When provided, the generator derives slotsPerDay from:
+             *   floor((closingTime - startTime - globalActivityMinutes) / slotDurationMinutes)
+             * where globalActivityMinutes = sum of durations of activities that apply
+             * to ALL days. Day-specific activities that have onlyOnDays set are subtracted
+             * from their specific days only (they replace subject slots on those days).
+             *
+             * When null, slotsPerDay is derived from the total periods needed across
+             * the week (existing behaviour: ceil(totalPeriods/numDays) + 2 slack).
+             */
+            java.time.LocalTime schoolClosingTime,
+
+            /**
+             * Activity slots in the day.
+             *
+             * Activities with onlyOnDays=null/empty → appear on ALL days, do NOT
+             * replace subject slots (they shift clock times only).
+             *
+             * Activities with onlyOnDays populated → appear ONLY on those days AND
+             * replace subject slots on those days (the activity occupies the time
+             * that would otherwise be used for subject slots). The subject slot
+             * count for those days is reduced by floor(durationMinutes / slotDurationMinutes).
              */
             List<ActivitySpec> activities,
 
@@ -87,39 +108,48 @@ public sealed interface TimetableCommand {
             @NotEmpty List<SubjectFrequency> subjectFrequencies,
 
             /** Optional note stored on the generated timetable. */
-            String notes,
-
-            /** Closing time for the school*/
-            LocalTime schoolClosingTime
+            String notes
     ) implements Command<Long>, TimetableCommand {
 
         /**
-         * Defines an activity block in the day.
+         * An activity block in the school day.
          *
-         * afterSlotNumber: position anchor.
-         *   0              = before all subject slots (first in day)
-         *   N              = after the Nth subject slot
-         *   Integer.MAX    = after all subject slots (last)
+         * afterSlotNumber:
+         *   0          = before all subject slots (first in day)
+         *   N          = after the Nth subject slot
+         *   large int  = after all subject slots (last)
          *
-         * onlyOnDays: optional. When null or empty the activity appears on every
-         *   operating day. When specified (e.g. ["THURSDAY"]) it only appears on
-         *   those days — all other days skip it. This supports school-specific
-         *   day patterns such as sports on Thursday mornings or vocational
-         *   activities on Friday afternoons.
+         * isLastOfDay (optional): when true this activity is always placed at
+         *   the end of the day, after all subject slots, regardless of
+         *   afterSlotNumber. Useful for end-of-day assemblies or dismissal
+         *   routines that must come last.
          *
-         * The subject slot COUNT is always consistent across all days regardless
-         * of which activities appear on a given day. Day-specific activities
-         * only shift the clock times of the subject slots on that day.
+         * onlyOnDays (optional):
+         *   null/empty  = global activity — appears on every operating day,
+         *                 does NOT replace subject slots.
+         *   populated   = day-specific activity — appears ONLY on those days
+         *                 AND replaces subject slots (the activity time is
+         *                 carved out of the subject-slot budget for those days).
+         *                 Example: Sports (80 min) on Thursday replaces 2 subject
+         *                 slots on Thursday; other days keep their full slot count.
          */
         public record ActivitySpec(
                 @NotNull String label,
                 @NotNull Integer durationMinutes,
                 @NotNull Integer afterSlotNumber,
-                /** Null or empty = all operating days. */
-                List<String> onlyOnDays,
-                /** Marks an activity as the last in a day */
-                boolean isLastOfDay
-        ) {}
+                /** When true, always placed last regardless of afterSlotNumber. */
+                Boolean isLastOfDay,
+                /** Null/empty = all days, no slot replacement. Populated = those days only, replaces slots. */
+                List<String> onlyOnDays
+        ) {
+            /** Whether this activity is day-specific (replaces slots on its days). */
+            public boolean isDaySpecific() {
+                return onlyOnDays != null && !onlyOnDays.isEmpty();
+            }
+            public boolean isLast() {
+                return Boolean.TRUE.equals(isLastOfDay);
+            }
+        }
 
         /** Marks a teacher as unavailable on specific days. */
         public record TeacherUnavailability(
