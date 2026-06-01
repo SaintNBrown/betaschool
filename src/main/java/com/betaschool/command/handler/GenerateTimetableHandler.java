@@ -103,9 +103,15 @@ public class GenerateTimetableHandler
                 buildOccurrences(cmd.subjectFrequencies(), subjectById,
                         operatingDays.size());
 
-        // Compute per-day slot capacity
+        // Compute per-day slot capacity (accounts for day-specific activity replacements)
         Map<DayOfWeek, Integer> perDaySlots =
                 computePerDaySlots(cmd, operatingDays, occurrences);
+
+        // FIX 2: isLastOfDay activities define a hard end-of-subjects boundary
+        // that applies to ALL days, not just the days they appear on.
+        // Find the earliest clock time any isLastOfDay activity begins, then
+        // cap every day so no subject slot extends past that time.
+        perDaySlots = applyLastOfDayCap(cmd, operatingDays, perDaySlots);
 
         // Build per-day templates (activities, clock times)
         Map<DayOfWeek, DayTemplate> templates =
@@ -173,6 +179,116 @@ public class GenerateTimetableHandler
         log.info("Generated timetable id={} v={} classSession={} school={}",
                 timetable.getId(), nextVersion, cmd.classSessionId(), schoolId);
         return timetable.getId();
+    }
+
+    /**
+     * FIX 2: Applies the isLastOfDay boundary to ALL operating days.
+     *
+     * When any activity has isLastOfDay=true, it defines an absolute cutoff:
+     * no subject on any day — including days where that activity does NOT
+     * appear — should run past the clock time when that activity begins.
+     *
+     * Algorithm:
+     *   1. For each isLastOfDay activity, compute its start clock time on
+     *      each day it appears.
+     *   2. Find the earliest such start time (globalCutoff).
+     *   3. Recompute the maximum subject slots each day can support before
+     *      reaching that cutoff.
+     *   4. Cap each day's slot count accordingly.
+     */
+    private Map<DayOfWeek, Integer> applyLastOfDayCap(
+            GenerateTimetableCommand cmd,
+            List<DayOfWeek> operatingDays,
+            Map<DayOfWeek, Integer> perDaySlots) {
+
+        if (cmd.activities() == null || cmd.activities().isEmpty())
+            return perDaySlots;
+
+        List<GenerateTimetableCommand.ActivitySpec> lastActivities =
+                cmd.activities().stream()
+                        .filter(GenerateTimetableCommand.ActivitySpec::isLast)
+                        .toList();
+
+        if (lastActivities.isEmpty())
+            return perDaySlots;
+
+        int slotMins = cmd.slotDurationMinutes();
+        LocalTime startTime = cmd.schoolStartTime();
+
+        // Non-last global activities affect every day's clock.
+        int globalNonLastMins = cmd.activities().stream()
+                .filter(a -> !a.isDaySpecific() && !a.isLast())
+                .mapToInt(GenerateTimetableCommand.ActivitySpec::durationMinutes)
+                .sum();
+
+        LocalTime globalCutoff = null;
+
+        for (GenerateTimetableCommand.ActivitySpec act : lastActivities) {
+
+            List<DayOfWeek> actDays = act.isDaySpecific()
+                    ? operatingDays.stream()
+                    .filter(d -> appliesToDay(act, d))
+                    .toList()
+                    : operatingDays;
+
+            for (DayOfWeek day : actDays) {
+
+                int daySpecificNonLastMins = cmd.activities().stream()
+                        .filter(a ->
+                                a.isDaySpecific()
+                                        && !a.isLast()
+                                        && appliesToDay(a, day))
+                        .mapToInt(
+                                GenerateTimetableCommand.ActivitySpec::durationMinutes)
+                        .sum();
+
+                int subjectSlots = perDaySlots.getOrDefault(day, 0);
+
+                long minutesUsed =
+                        globalNonLastMins
+                                + daySpecificNonLastMins
+                                + (long) subjectSlots * slotMins;
+
+                LocalTime actStart = startTime.plusMinutes(minutesUsed);
+
+                if (globalCutoff == null || actStart.isBefore(globalCutoff)) {
+                    globalCutoff = actStart;
+                }
+            }
+        }
+
+        if (globalCutoff == null)
+            return perDaySlots;
+
+        Map<DayOfWeek, Integer> capped = new LinkedHashMap<>();
+
+        for (DayOfWeek day : operatingDays) {
+
+            int daySpecificNonLastMins = cmd.activities().stream()
+                    .filter(a ->
+                            a.isDaySpecific()
+                                    && !a.isLast()
+                                    && appliesToDay(a, day))
+                    .mapToInt(
+                            GenerateTimetableCommand.ActivitySpec::durationMinutes)
+                    .sum();
+
+            long availableForSubjects =
+                    java.time.Duration.between(startTime, globalCutoff).toMinutes()
+                            - globalNonLastMins
+                            - daySpecificNonLastMins;
+
+            int maxSlots =
+                    availableForSubjects <= 0
+                            ? 0
+                            : (int) (availableForSubjects / slotMins);
+
+            int current = perDaySlots.getOrDefault(day, 0);
+
+            capped.put(day, Math.min(current, maxSlots));
+        }
+
+        return capped;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -722,11 +838,20 @@ public class GenerateTimetableHandler
 
         for (DayOfWeek day : operatingDays) {
             DayTemplate template = templates.get(day);
-            Map<Integer, Long> posToSubject = new HashMap<>();
-            for (PlacedSlot ps : placed.getOrDefault(day, List.of()))
-                posToSubject.put(ps.position(), ps.classSubjectId());
 
-            int subjectSlotIdx = 0;
+            // FIX 1: Pack subjects compactly into the template's SUBJECT DaySlots.
+            // Sort placed slots by position so they are assigned in order.
+            // Skip empty subject-slot positions entirely — no blank time gaps.
+            // This prevents the pattern: [SubjectA], [empty], [SubjectA], [activity]
+            // that occurred when a double was placed at non-consecutive positions
+            // relative to empty slots, causing blank periods to appear in output.
+            List<Long> orderedSubjects = placed.getOrDefault(day, List.of())
+                    .stream()
+                    .sorted(Comparator.comparingInt(PlacedSlot::position))
+                    .map(PlacedSlot::classSubjectId)
+                    .toList();
+
+            int subjectQueue = 0; // index into orderedSubjects
             for (DaySlot ds : template.slots()) {
                 if (ds.type() == DaySlotType.ACTIVITY) {
                     result.add(TimetableSlotEntity.builder()
@@ -736,8 +861,9 @@ public class GenerateTimetableHandler
                             .activityLabel(ds.label())
                             .sortOrder(sortOrder++).build());
                 } else {
-                    Long csId = posToSubject.get(subjectSlotIdx);
-                    if (csId != null) {
+                    // SUBJECT slot: fill from queue, skip if exhausted
+                    if (subjectQueue < orderedSubjects.size()) {
+                        Long csId = orderedSubjects.get(subjectQueue++);
                         result.add(TimetableSlotEntity.builder()
                                 .schoolId(schoolId).dayOfWeek(day)
                                 .startTime(ds.start()).endTime(ds.end())
@@ -745,7 +871,7 @@ public class GenerateTimetableHandler
                                 .classSubject(subjectById.get(csId))
                                 .sortOrder(sortOrder++).build());
                     }
-                    subjectSlotIdx++;
+                    // If queue exhausted: surplus slot — emit nothing, no gap in output
                 }
             }
         }
