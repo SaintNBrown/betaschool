@@ -17,33 +17,23 @@ public sealed interface TimetableCommand {
      * is submitted as a list of slots. The previous active timetable is
      * deactivated, a new version is created, and the cap of 5 historical
      * versions is enforced by deleting the oldest if exceeded.
-     *
-     * Slot validation rules enforced in the handler:
-     *  - end_time must be after start_time (also enforced at DB level)
-     *  - SUBJECT slots must reference a class_subject belonging to this class-session
-     *  - ACTIVITY slots must have a non-blank activity_label
-     *  - No two slots on the same day may have overlapping time ranges
      */
     record PublishTimetableCommand(
             Long classSessionId,
-            String notes,                      // optional — describe what changed
+            String notes,
             @NotEmpty @Valid List<TimetableSlotInput> slots
     ) implements Command<Long>, TimetableCommand {}
 
     record TimetableSlotInput(
-            @NotNull String dayOfWeek,         // MONDAY..SUNDAY
+            @NotNull String dayOfWeek,
             @NotNull LocalTime startTime,
             @NotNull LocalTime endTime,
-            @NotNull String slotType,          // SUBJECT or ACTIVITY
-            Long classSubjectId,               // required when slotType = SUBJECT
-            String activityLabel,              // required when slotType = ACTIVITY
-            Integer sortOrder                  // optional; defaults to 0
+            @NotNull String slotType,
+            Long classSubjectId,
+            String activityLabel,
+            Integer sortOrder
     ) {}
 
-    /**
-     * Permanently deletes a specific historical timetable version.
-     * The active timetable cannot be deleted this way — publish a new one to replace it.
-     */
     record DeleteTimetableVersionCommand(
             Long timetableId
     ) implements Command<Void>, TimetableCommand {}
@@ -52,15 +42,13 @@ public sealed interface TimetableCommand {
      * Generates a complete weekly timetable for a class-session using a constraint
      * satisfaction solver, then publishes it via the existing PublishTimetableHandler.
      *
-     * The generator respects:
-     *  - Max 2 consecutive slots of the same subject per day
-     *  - Teacher-transition constraint: consecutive subject groups must not share a teacher
-     *  - Teacher unavailable days
-     *  - School non-operating days
-     *  - Cross-class teacher conflicts (against other active timetables)
-     *  - Activity placement with consistent position across all operating days
-     *  - Consistent subject-slot duration across all days
-     *  - Per-subject frequency (periodsPerWeek)
+     * Global activities appear on EVERY operating day at the SAME subject-slot
+     * position (e.g. Break always after the 4th subject slot). Their clock time
+     * may vary per day due to day-specific slot replacements, but their position
+     * is fixed across the week.
+     *
+     * Day-specific activities appear ONLY on specific days and REPLACE subject
+     * slots. They are expressed as "replaces N subject slots" (e.g. replaces 2 slots).
      */
     record GenerateTimetableCommand(
             Long classSessionId,
@@ -75,31 +63,22 @@ public sealed interface TimetableCommand {
             @NotNull LocalTime schoolStartTime,
 
             /**
-             * Optional school closing time — e.g. "14:00".
-             *
-             * When provided, the generator derives slotsPerDay from:
-             *   floor((closingTime - startTime - globalActivityMinutes) / slotDurationMinutes)
-             * where globalActivityMinutes = sum of durations of activities that apply
-             * to ALL days. Day-specific activities that have onlyOnDays set are subtracted
-             * from their specific days only (they replace subject slots on those days).
-             *
-             * When null, slotsPerDay is derived from the total periods needed across
-             * the week (existing behaviour: ceil(totalPeriods/numDays) + 2 slack).
+             * Optional school closing time. When provided, ensures no day exceeds
+             * this time. When null, days can extend as needed.
              */
-            java.time.LocalTime schoolClosingTime,
+            LocalTime schoolClosingTime,
 
             /**
-             * Activity slots in the day.
-             *
-             * Activities with onlyOnDays=null/empty → appear on ALL days, do NOT
-             * replace subject slots (they shift clock times only).
-             *
-             * Activities with onlyOnDays populated → appear ONLY on those days AND
-             * replace subject slots on those days (the activity occupies the time
-             * that would otherwise be used for subject slots). The subject slot
-             * count for those days is reduced by floor(durationMinutes / slotDurationMinutes).
+             * Global activities — appear on EVERY operating day at the same
+             * subject-slot position across all days.
              */
-            List<ActivitySpec> activities,
+            List<GlobalActivitySpec> globalActivities,
+
+            /**
+             * Day-specific activities — appear ONLY on specified days and
+             * REPLACE subject slots on those days.
+             */
+            List<DaySpecificActivitySpec> daySpecificActivities,
 
             /** Per-teacher unavailable days. */
             List<TeacherUnavailability> teacherUnavailableDays,
@@ -112,40 +91,48 @@ public sealed interface TimetableCommand {
     ) implements Command<Long>, TimetableCommand {
 
         /**
-         * An activity block in the school day.
+         * Global activity — appears on EVERY operating day at the same
+         * subject-slot position.
          *
          * afterSlotNumber:
-         *   0          = before all subject slots (first in day)
-         *   N          = after the Nth subject slot
-         *   large int  = after all subject slots (last)
+         *   0 = before any subject slots (first)
+         *   1..N = after the Nth subject slot
+         *   Integer.MAX_VALUE = after all subject slots (last)
          *
-         * isLastOfDay (optional): when true this activity is always placed at
-         *   the end of the day, after all subject slots, regardless of
-         *   afterSlotNumber. Useful for end-of-day assemblies or dismissal
-         *   routines that must come last.
-         *
-         * onlyOnDays (optional):
-         *   null/empty  = global activity — appears on every operating day,
-         *                 does NOT replace subject slots.
-         *   populated   = day-specific activity — appears ONLY on those days
-         *                 AND replaces subject slots (the activity time is
-         *                 carved out of the subject-slot budget for those days).
-         *                 Example: Sports (80 min) on Thursday replaces 2 subject
-         *                 slots on Thursday; other days keep their full slot count.
+         * durationSlots: how many subject-slot durations this activity occupies.
+         *   e.g. 0.5 for a 20min break when slotDurationMinutes=40
+         *        1.0 for a 40min assembly
+         *        2.0 for an 80min activity
          */
-        public record ActivitySpec(
+        public record GlobalActivitySpec(
                 @NotNull String label,
-                @NotNull Integer durationMinutes,
                 @NotNull Integer afterSlotNumber,
-                /** When true, always placed last regardless of afterSlotNumber. */
-                Boolean isLastOfDay,
-                /** Null/empty = all days, no slot replacement. Populated = those days only, replaces slots. */
-                List<String> onlyOnDays
+                @NotNull Double durationSlots
+        ) {}
+
+        /**
+         * Day-specific activity — appears ONLY on specified days and REPLACES
+         * subject slots on those days.
+         *
+         * afterSlotNumber: position relative to REMAINING subject slots
+         *   (after removing previously placed day-specific activities)
+         *
+         * replacesSlots: how many subject slot positions this activity consumes.
+         *   Example: replacesSlots=2 means two consecutive subject slots are
+         *   replaced by this activity.
+         *
+         * onlyOnDays: which days this activity appears on (must be non-empty)
+         *
+         * isLastOfDay: when true, always placed at end of day regardless of
+         *   afterSlotNumber. Useful for dismissal or end-of-day routines.
+         */
+        public record DaySpecificActivitySpec(
+                @NotNull String label,
+                @NotEmpty List<String> onlyOnDays,
+                @NotNull Integer afterSlotNumber,
+                @NotNull Integer replacesSlots,
+                Boolean isLastOfDay
         ) {
-            /** Whether this activity is day-specific (replaces slots on its days). */
-            public boolean isDaySpecific() {
-                return onlyOnDays != null && !onlyOnDays.isEmpty();
-            }
             public boolean isLast() {
                 return Boolean.TRUE.equals(isLastOfDay);
             }
@@ -161,11 +148,8 @@ public sealed interface TimetableCommand {
          * How many periods per week a specific class-subject should receive.
          *
          * forceDouble: only relevant when periodsPerWeek == 2.
-         *   false (default) — the two periods are placed as two SINGLES on
-         *     different days, alternating across the week for even spread.
-         *   true  — the two periods are placed as one DOUBLE (consecutive
-         *     slots on the same day), useful for subjects that benefit from
-         *     a longer uninterrupted block (e.g. practicals, art).
+         *   false (default) — two SINGLES on different days
+         *   true — one DOUBLE on one day
          *
          * For periodsPerWeek >= 3 the generator always maximises doubles
          * (max doubles, remaining singles) regardless of this flag.
@@ -173,7 +157,6 @@ public sealed interface TimetableCommand {
         public record SubjectFrequency(
                 @NotNull Long classSubjectId,
                 @NotNull Integer periodsPerWeek,
-                /** Only applies when periodsPerWeek == 2. Default false. */
                 Boolean forceDouble
         ) {}
     }
