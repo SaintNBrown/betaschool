@@ -87,8 +87,7 @@ public class TimetableController {
                      - Teacher-transition: consecutive subject groups must not share a teacher
                      - Teacher unavailable days
                      - Cross-class teacher conflicts (checks all other active timetables)
-                     - Activity placement: global activities appear at SAME position across all days
-                     - Day-specific activities REPLACE subject slots (expressed as replacesSlots count)
+                     - Activity placement consistent across all operating days
                      - Per-subject period frequency
 
                    On success, publishes and stores the generated timetable identically to
@@ -104,8 +103,7 @@ public class TimetableController {
                 req.slotDurationMinutes(),
                 req.schoolStartTime(),
                 req.schoolClosingTime(),
-                req.globalActivities(),
-                req.daySpecificActivities(),
+                req.activities(),
                 req.teacherUnavailableDays(),
                 req.subjectFrequencies(),
                 req.notes()));
@@ -126,12 +124,9 @@ public class TimetableController {
             @jakarta.validation.constraints.NotEmpty List<String> operatingDays,
             @jakarta.validation.constraints.NotNull Integer slotDurationMinutes,
             @jakarta.validation.constraints.NotNull java.time.LocalTime schoolStartTime,
-            /** Optional. When provided, ensures no day exceeds this time. */
+            /** Optional. When provided, derives slotsPerDay from closing time. */
             java.time.LocalTime schoolClosingTime,
-            /** Global activities — appear on EVERY operating day at the same subject-slot position */
-            List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.GlobalActivitySpec> globalActivities,
-            /** Day-specific activities — appear ONLY on specified days and REPLACE subject slots */
-            List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.DaySpecificActivitySpec> daySpecificActivities,
+            List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.ActivitySpec> activities,
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.TeacherUnavailability> teacherUnavailableDays,
             @jakarta.validation.constraints.NotEmpty
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.SubjectFrequency> subjectFrequencies,

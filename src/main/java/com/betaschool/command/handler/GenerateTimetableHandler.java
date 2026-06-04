@@ -19,6 +19,45 @@ import java.time.LocalTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * Two-phase timetable generator with canonical clock-time pinning.
+ *
+ * ── CORE DESIGN PRINCIPLE ────────────────────────────────────────────────
+ *
+ * Global activities (onlyOnDays null/empty) are pinned to the SAME clock
+ * time on EVERY operating day. Their position is computed from the canonical
+ * day (no day-specific activities). Day-specific activities on any given day
+ * never shift the clock time of global activities on that day.
+ *
+ * Day-specific activities (onlyOnDays populated) replace subject slots on
+ * their days. Their duration is expressed in SUBJECT SLOT PERIODS
+ * (periodsReplaced), not minutes. This makes the request intent explicit:
+ * "Sports replaces 1 period" rather than "Sports is 40 minutes."
+ *
+ * ── TEMPLATE ARCHITECTURE ────────────────────────────────────────────────
+ *
+ * Step 1 — CANONICAL SLOT TIMES:
+ *   Compute the clock start/end of every subject slot position using ONLY
+ *   global activities. This produces one canonical timeline shared across
+ *   all days. Break at 11:30am is always 11:30am regardless of the day.
+ *
+ * Step 2 — PER-DAY TEMPLATES:
+ *   For each day, take the canonical timeline and:
+ *   a) Insert global activities at their canonical clock positions (unchanged).
+ *   b) Replace subject slots consumed by day-specific activities with those
+ *      activity blocks at the same clock positions as the displaced slots.
+ *   c) Place isLastOfDay activities after all subject slots.
+ *
+ * ── OCCURRENCE STRUCTURE ─────────────────────────────────────────────────
+ *   periods=1  → 1 single
+ *   periods=2  → 2 singles different days (default) or 1 double (forceDouble)
+ *   periods≥3  → max doubles + singles, each occurrence on distinct day
+ *
+ * ── PHASES ───────────────────────────────────────────────────────────────
+ *   Phase 1: assign each occurrence to a day (backtracking CSP)
+ *   Phase 2: place occurrences into slot positions within each day
+ *   Post:    end-time balancing (≤2 slot gap across days)
+ */
 @Component
 @RequiredArgsConstructor
 @Slf4j
@@ -26,21 +65,21 @@ import java.util.stream.Collectors;
 public class GenerateTimetableHandler
         implements CommandHandler<GenerateTimetableCommand, Long> {
 
-    private static final int MAX_PHASE1_ATTEMPTS = 100;
-    private static final int MAX_PHASE2_ATTEMPTS = 50;
+    private static final int MAX_PHASE1 = 100;
+    private static final int MAX_PHASE2 =  50;
 
     private final JpaClassSessionRepository  classSessionRepo;
     private final JpaClassSubjectRepository  classSubjectRepo;
     private final JpaTimetableSlotRepository slotRepo;
     private final JpaTimetableRepository     timetableRepo;
 
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
     //  Entry point
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
 
     @Override
     public Long handle(GenerateTimetableCommand cmd) {
-        Long schoolId = SchoolIdInjector.require();
+        Long schoolId    = SchoolIdInjector.require();
         Long currentUser = TenantContext.getUserId();
 
         ClassSessionEntity classSession =
@@ -49,70 +88,72 @@ public class GenerateTimetableHandler
                                 "ClassSession", cmd.classSessionId()));
 
         List<DayOfWeek> operatingDays = parseOperatingDays(cmd.operatingDays());
-
-        Map<Long, Set<DayOfWeek>> unavailable =
-                buildUnavailabilityMap(cmd.teacherUnavailableDays());
+        Map<Long, Set<DayOfWeek>> unavailable = buildUnavailabilityMap(cmd.teacherUnavailableDays());
 
         List<ClassSubjectEntity> classSubjects =
-                classSubjectRepo.findByClassSessionIdAndSchoolId(
-                        cmd.classSessionId(), schoolId);
+                classSubjectRepo.findByClassSessionIdAndSchoolId(cmd.classSessionId(), schoolId);
         Map<Long, ClassSubjectEntity> subjectById = classSubjects.stream()
                 .collect(Collectors.toMap(ClassSubjectEntity::getId, s -> s));
 
-        List<Occurrence> occurrences = buildOccurrences(
-                cmd.subjectFrequencies(), subjectById, operatingDays.size());
+        List<Occurrence> occurrences =
+                buildOccurrences(cmd.subjectFrequencies(), subjectById, operatingDays.size());
 
-        // Build base template from GLOBAL activities only
-        DayTemplate baseTemplate = buildBaseTemplate(
-                cmd.globalActivities(), cmd.slotDurationMinutes(), cmd.schoolStartTime());
+        int slotMins = cmd.slotDurationMinutes();
 
-        // Compute per-day subject slot capacity (after day-specific activity replacements)
+        // ── Step 1: canonical slot times (global activities only) ─────────
+        // These times are pinned and identical on every operating day.
+        List<CanonicalSlot> canonical = buildCanonicalSlots(cmd, slotMins);
+        int slotsPerDay = (int) canonical.stream()
+                .filter(s -> s.type() == SlotKind.SUBJECT).count();
+
+        // ── Step 2: per-day subject slot capacity ─────────────────────────
+        // Global activities don't reduce capacity; day-specific ones do.
         Map<DayOfWeek, Integer> perDaySlots = computePerDaySlots(
-                cmd, operatingDays, baseTemplate, occurrences);
+                cmd, operatingDays, canonical, slotMins);
 
-        // Build per-day templates by applying day-specific replacements to base template
-        Map<DayOfWeek, DayTemplate> templates = buildDayTemplates(
-                cmd, operatingDays, baseTemplate, perDaySlots);
+        // ── Step 3: apply isLastOfDay cap across all days ─────────────────
+        perDaySlots = applyLastOfDayCap(cmd, operatingDays, perDaySlots, canonical, slotMins);
+
+        // ── Step 4: build per-day templates from canonical baseline ───────
+        Map<DayOfWeek, DayTemplate> templates =
+                buildDayTemplates(cmd, operatingDays, canonical, perDaySlots, slotMins);
 
         validateFeasibility(occurrences, operatingDays, perDaySlots);
 
-        List<OccupiedInterval> occupied =
-                loadOccupiedIntervals(schoolId, cmd.classSessionId());
+        List<OccupiedInterval> occupied = loadOccupiedIntervals(schoolId, cmd.classSessionId());
+        DayTemplate baseTemplate = templates.get(operatingDays.get(0));
 
         // ── Phase 1: day assignment ───────────────────────────────────────
         Map<DayOfWeek, List<Occurrence>> dayAssignment = null;
         Random rng = new Random();
-
-        for (int a = 0; a < MAX_PHASE1_ATTEMPTS && dayAssignment == null; a++) {
-            dayAssignment = phase1DayAssign(
-                    occurrences, operatingDays, perDaySlots,
+        for (int a = 0; a < MAX_PHASE1 && dayAssignment == null; a++) {
+            dayAssignment = phase1DayAssign(occurrences, operatingDays, perDaySlots,
                     unavailable, occupied, baseTemplate, rng);
         }
-
         if (dayAssignment == null) {
+            int minSlots = perDaySlots.values().stream().mapToInt(Integer::intValue).min().orElse(0);
             throw new BusinessRuleViolationException(
-                    "Could not assign subjects to days after " + MAX_PHASE1_ATTEMPTS
-                            + " attempts.\n" + diagnose(occurrences, subjectById,
-                            operatingDays, unavailable, occupied, baseTemplate));
+                    "Could not assign subjects to days after " + MAX_PHASE1 + " attempts.\n"
+                            + diagnose(occurrences, subjectById, operatingDays,
+                            unavailable, occupied, baseTemplate, minSlots));
         }
 
-        // ── Phase 2: slot placement within each day ───────────────────────
+        // ── Phase 2: slot placement ───────────────────────────────────────
         Map<DayOfWeek, List<PlacedSlot>> placed = null;
-        for (int a = 0; a < MAX_PHASE2_ATTEMPTS && placed == null; a++) {
+        for (int a = 0; a < MAX_PHASE2 && placed == null; a++) {
             placed = phase2SlotPlace(dayAssignment, operatingDays, templates,
                     subjectById, occupied, rng);
         }
-
-        if (placed == null) {
+        if (placed == null)
             throw new BusinessRuleViolationException(
-                    "Could not arrange slots within days after " + MAX_PHASE2_ATTEMPTS
-                            + " attempts. Adjust subject frequencies or teacher assignments.");
-        }
+                    "Could not arrange slots within days after " + MAX_PHASE2 + " attempts.");
+
+        placed = balanceEndTimes(placed, operatingDays, perDaySlots);
 
         // ── Persist ───────────────────────────────────────────────────────
         timetableRepo.deactivateAllForClassSession(cmd.classSessionId(), schoolId);
-        int nextVersion = timetableRepo.findMaxVersionByClassSessionIdAndSchoolId(
-                cmd.classSessionId(), schoolId) + 1;
+        int nextVersion = timetableRepo
+                .findMaxVersionByClassSessionIdAndSchoolId(cmd.classSessionId(), schoolId) + 1;
         String notes = (cmd.notes() != null && !cmd.notes().isBlank())
                 ? cmd.notes() : "Auto-generated v" + nextVersion;
 
@@ -121,8 +162,8 @@ public class GenerateTimetableHandler
                 .version(nextVersion).active(true).notes(notes)
                 .createdBy(currentUser).build());
 
-        List<TimetableSlotEntity> entities = buildEntities(
-                placed, operatingDays, templates, schoolId, subjectById);
+        List<TimetableSlotEntity> entities =
+                buildEntities(placed, operatingDays, templates, schoolId, subjectById);
         entities.forEach(s -> s.setTimetable(timetable));
         slotRepo.saveAll(entities);
 
@@ -131,305 +172,370 @@ public class GenerateTimetableHandler
         return timetable.getId();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Base template from global activities
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    //  Step 1 — Canonical slot timeline (global activities only)
+    // ═════════════════════════════════════════════════════════════════════
 
     /**
-     * Builds the base template using ONLY global activities.
-     * This template is IDENTICAL for all operating days.
-     * Subject slots are represented as placeholders with calculated times.
+     * Builds the canonical ordered list of slots using ONLY global activities
+     * (isDaySpecific=false). Subject slot positions get their definitive clock
+     * times here. These times are reused verbatim for every operating day.
+     *
+     * slotsPerDay is derived from schoolClosingTime (if provided) or from
+     * total occurrences. Global activities consume clock time but do NOT
+     * reduce slotsPerDay — they push the day's end time later.
      */
-    private DayTemplate buildBaseTemplate(
-            List<GenerateTimetableCommand.GlobalActivitySpec> globalActivities,
-            int slotDurationMinutes,
-            LocalTime startTime) {
+    private List<CanonicalSlot> buildCanonicalSlots(
+            GenerateTimetableCommand cmd, int slotMins) {
 
-        if (globalActivities == null || globalActivities.isEmpty()) {
-            // No global activities — just one subject slot placeholder
-            LocalTime end = startTime.plusMinutes(slotDurationMinutes);
-            return new DayTemplate(List.of(new DaySlot(DaySlotType.SUBJECT, startTime, end, null)), 1);
+        List<GenerateTimetableCommand.ActivitySpec> globals = (cmd.activities() == null)
+                ? List.of()
+                : cmd.activities().stream()
+                .filter(a -> !a.isDaySpecific() && !a.isLast())
+                .sorted(Comparator.comparingInt(
+                        GenerateTimetableCommand.ActivitySpec::afterSlotNumber))
+                .collect(Collectors.toList());
+
+        List<GenerateTimetableCommand.ActivitySpec> globalLast = (cmd.activities() == null)
+                ? List.of()
+                : cmd.activities().stream()
+                .filter(a -> !a.isDaySpecific() && a.isLast())
+                .collect(Collectors.toList());
+
+        // Determine how many subject slots the canonical day has
+        int globalActivityMins = globals.stream()
+                .mapToInt(a -> a.resolvedMinutes(slotMins)).sum()
+                + globalLast.stream()
+                .mapToInt(a -> a.resolvedMinutes(slotMins)).sum();
+
+        int slotsPerDay;
+        if (cmd.schoolClosingTime() != null) {
+            long totalMins = java.time.Duration.between(
+                    cmd.schoolStartTime(), cmd.schoolClosingTime()).toMinutes();
+            if (totalMins <= 0) throw new BusinessRuleViolationException(
+                    "schoolClosingTime must be after schoolStartTime.");
+            slotsPerDay = (int) Math.max(1, (totalMins - globalActivityMins) / slotMins);
+        } else {
+            // Will be refined later in computePerDaySlots; use generous initial estimate
+            slotsPerDay = 12; // max cap — trimmed in computePerDaySlots
         }
 
-        // Sort activities by afterSlotNumber
-        List<GenerateTimetableCommand.GlobalActivitySpec> sorted = new ArrayList<>(globalActivities);
-        sorted.sort(Comparator.comparingInt(GenerateTimetableCommand.GlobalActivitySpec::afterSlotNumber));
-
-        LocalTime cursor = startTime;
-        List<DaySlot> slots = new ArrayList<>();
-        int subjectCount = 0;
+        // Build canonical slot list
+        List<CanonicalSlot> result = new ArrayList<>();
+        LocalTime cursor = cmd.schoolStartTime();
         int actIdx = 0;
 
-        // Activities before any subjects (afterSlotNumber = 0)
-        while (actIdx < sorted.size() && sorted.get(actIdx).afterSlotNumber() == 0) {
-            var act = sorted.get(actIdx++);
-            int durationMins = (int) Math.round(act.durationSlots() * slotDurationMinutes);
-            LocalTime end = cursor.plusMinutes(durationMins);
-            slots.add(new DaySlot(DaySlotType.ACTIVITY, cursor, end, act.label()));
+        // Global activities before all subjects (afterSlotNumber == 0)
+        while (actIdx < globals.size() && globals.get(actIdx).afterSlotNumber() == 0) {
+            var a = globals.get(actIdx++);
+            LocalTime end = cursor.plusMinutes(a.resolvedMinutes(slotMins));
+            result.add(new CanonicalSlot(SlotKind.GLOBAL_ACTIVITY, cursor, end, a.label(), -1));
             cursor = end;
         }
 
-        // We don't know how many subject slots yet — will be adjusted per day
-        // For base template, we just record the activity positions relative to subject slot indices
-        // We'll store activity anchors for later expansion
-
-        // For now, build a simplified representation that captures the sequence
-        List<BaseTemplateElement> elements = new ArrayList<>();
-        cursor = startTime;
-        actIdx = 0;
-        int nextActivityAt = 0;
-
-        while (actIdx < sorted.size()) {
-            var act = sorted.get(actIdx);
-            if (act.afterSlotNumber() == nextActivityAt) {
-                int durationMins = (int) Math.round(act.durationSlots() * slotDurationMinutes);
-                LocalTime actEnd = cursor.plusMinutes(durationMins);
-                elements.add(new BaseTemplateElement(act.label(), durationMins, true));
+        for (int s = 1; s <= slotsPerDay; s++) {
+            LocalTime end = cursor.plusMinutes(slotMins);
+            result.add(new CanonicalSlot(SlotKind.SUBJECT, cursor, end, null, s - 1));
+            cursor = end;
+            while (actIdx < globals.size()
+                    && globals.get(actIdx).afterSlotNumber() == s) {
+                var a = globals.get(actIdx++);
+                LocalTime actEnd = cursor.plusMinutes(a.resolvedMinutes(slotMins));
+                result.add(new CanonicalSlot(SlotKind.GLOBAL_ACTIVITY, cursor, actEnd, a.label(), -1));
                 cursor = actEnd;
-                actIdx++;
-            } else {
-                // Subject slot
-                LocalTime slotEnd = cursor.plusMinutes(slotDurationMinutes);
-                elements.add(new BaseTemplateElement(null, slotDurationMinutes, false));
-                cursor = slotEnd;
-                nextActivityAt++;
             }
         }
-
-        // Return a DayTemplate with expanded slots
-        cursor = startTime;
-        List<DaySlot> expandedSlots = new ArrayList<>();
-        for (BaseTemplateElement elem : elements) {
-            LocalTime end = cursor.plusMinutes(elem.durationMinutes);
-            if (elem.isActivity) {
-                expandedSlots.add(new DaySlot(DaySlotType.ACTIVITY, cursor, end, elem.label));
-            } else {
-                expandedSlots.add(new DaySlot(DaySlotType.SUBJECT, cursor, end, null));
-            }
+        // Remaining positioned globals beyond slotsPerDay
+        while (actIdx < globals.size()) {
+            var a = globals.get(actIdx++);
+            LocalTime end = cursor.plusMinutes(a.resolvedMinutes(slotMins));
+            result.add(new CanonicalSlot(SlotKind.GLOBAL_ACTIVITY, cursor, end, a.label(), -1));
             cursor = end;
         }
-
-        int subjectSlotCount = (int) elements.stream().filter(e -> !e.isActivity).count();
-        return new DayTemplate(expandedSlots, subjectSlotCount);
+        for (var a : globalLast) {
+            LocalTime end = cursor.plusMinutes(a.resolvedMinutes(slotMins));
+            result.add(new CanonicalSlot(SlotKind.GLOBAL_LAST_ACTIVITY, cursor, end, a.label(), -1));
+            cursor = end;
+        }
+        return result;
     }
 
-    private record BaseTemplateElement(String label, int durationMinutes, boolean isActivity) {}
-
-    // ─────────────────────────────────────────────────────────────────────
-    //  Per-day slot computation
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    //  Step 2 — Per-day subject slot capacity
+    // ═════════════════════════════════════════════════════════════════════
 
     /**
-     * Computes how many subject slots each operating day gets.
+     * Derives how many subject slots each day has.
      *
-     * Base subject slots come from either:
-     *   - If schoolClosingTime provided: derived from available minutes
-     *   - Otherwise: derived from total periods needed across the week
+     * The canonical day has slotsPerDay subject slots.
+     * Day-specific activities replace some of those slots:
+     *   replacedSlots = sum of activity.slotsReplaced() for activities on that day
+     *   (not counting isLastOfDay — they go AFTER all slots)
      *
-     * Then day-specific activity replacements reduce the count for specific days.
+     * isLastOfDay day-specific activities do NOT reduce slotsPerDay;
+     * they sit after the last subject slot.
      */
     private Map<DayOfWeek, Integer> computePerDaySlots(
             GenerateTimetableCommand cmd,
             List<DayOfWeek> operatingDays,
-            DayTemplate baseTemplate,
-            List<Occurrence> occurrences) {
+            List<CanonicalSlot> canonical,
+            int slotMins) {
 
-        int slotMins = cmd.slotDurationMinutes();
-        int numDays = operatingDays.size();
+        int canonicalSubjectSlots = (int) canonical.stream()
+                .filter(s -> s.type() == SlotKind.SUBJECT).count();
 
-        // Base subject slots before day-specific replacements
+        // If no closingTime, derive from occurrences
         int baseSlots;
         if (cmd.schoolClosingTime() != null) {
-            long totalDayMins = java.time.Duration.between(
-                    cmd.schoolStartTime(), cmd.schoolClosingTime()).toMinutes();
-            if (totalDayMins <= 0) {
-                throw new BusinessRuleViolationException(
-                        "schoolClosingTime must be after schoolStartTime.");
-            }
-            // Calculate how many full subject slots fit in the day
-            // Subtract global activity time from base template
-            long globalActivityMins = baseTemplate.slots().stream()
-                    .filter(s -> s.type() == DaySlotType.ACTIVITY)
-                    .mapToLong(s -> java.time.Duration.between(s.start(), s.end()).toMinutes())
-                    .sum();
-            long availableMins = totalDayMins - globalActivityMins;
-            if (availableMins <= 0) {
-                throw new BusinessRuleViolationException(
-                        "Global activities consume the entire school day.");
-            }
-            baseSlots = (int) (availableMins / slotMins);
+            baseSlots = canonicalSubjectSlots;
         } else {
-            int totalPeriods = occurrences.stream()
-                    .mapToInt(o -> o.isDouble() ? 2 : 1).sum();
-            baseSlots = Math.max(1, (int) Math.ceil((double) totalPeriods / numDays) + 2);
+            // We need actual occurrence count — re-read subjectFrequencies
+            int totalPeriods = cmd.subjectFrequencies().stream()
+                    .mapToInt(GenerateTimetableCommand.SubjectFrequency::periodsPerWeek)
+                    .sum();
+            int numDays = operatingDays.size();
+            baseSlots = Math.min((int) Math.ceil((double) totalPeriods / numDays) + 2, 12);
         }
 
-        // Apply day-specific slot replacements
+        List<GenerateTimetableCommand.ActivitySpec> activities =
+                cmd.activities() == null ? List.of() : cmd.activities();
+
         Map<DayOfWeek, Integer> result = new LinkedHashMap<>();
-        Map<DayOfWeek, Integer> replacementsPerDay = new HashMap<>();
-
-        if (cmd.daySpecificActivities() != null) {
-            for (var act : cmd.daySpecificActivities()) {
-                for (String dayName : act.onlyOnDays()) {
-                    try {
-                        DayOfWeek day = DayOfWeek.valueOf(dayName.toUpperCase().trim());
-                        replacementsPerDay.merge(day, act.replacesSlots(), Integer::sum);
-                    } catch (IllegalArgumentException ignored) {}
-                }
-            }
-        }
-
         for (DayOfWeek day : operatingDays) {
-            int replaced = replacementsPerDay.getOrDefault(day, 0);
-            int slots = Math.max(baseSlots - replaced, 1);
-            result.put(day, slots);
+            int replaced = activities.stream()
+                    .filter(a -> a.isDaySpecific() && !a.isLast() && appliesToDay(a, day))
+                    .mapToInt(GenerateTimetableCommand.ActivitySpec::slotsReplaced)
+                    .sum();
+            result.put(day, Math.max(baseSlots - replaced, 0));
         }
         return result;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Day template building with replacements
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    //  Step 3 — isLastOfDay cross-day cap
+    // ═════════════════════════════════════════════════════════════════════
 
     /**
-     * Builds per-day templates by applying day-specific activity replacements
-     * to the shared base template.
+     * If any isLastOfDay activity exists, no subject slot on ANY day
+     * should end later than the earliest clock time that activity begins
+     * across all its days.
+     *
+     * For a day-specific isLastOfDay activity: its start time on day D is
+     *   startTime + globalMins + daySpecificNonLastMins_for_D
+     *   + perDaySlots[D] * slotMins
+     * That start time becomes the latest any subject can end on all days.
+     *
+     * For a global isLastOfDay activity: it begins at the canonical last
+     * subject slot's end time, which is already the cap for all days.
+     */
+    private Map<DayOfWeek, Integer> applyLastOfDayCap(
+            GenerateTimetableCommand cmd,
+            List<DayOfWeek> operatingDays,
+            Map<DayOfWeek, Integer> perDaySlots,
+            List<CanonicalSlot> canonical,
+            int slotMins) {
+
+        if (cmd.activities() == null) return perDaySlots;
+
+        List<GenerateTimetableCommand.ActivitySpec> lastActivities = cmd.activities().stream()
+                .filter(GenerateTimetableCommand.ActivitySpec::isLast)
+                .collect(Collectors.toList());
+        if (lastActivities.isEmpty()) return perDaySlots;
+
+        // Global activity minutes before all subjects (clock offset for any day)
+        int globalMins = cmd.activities().stream()
+                .filter(a -> !a.isDaySpecific() && !a.isLast())
+                .mapToInt(a -> a.resolvedMinutes(slotMins))
+                .sum();
+
+        // Find the canonical end time of the last subject slot
+        // (= the latest a subject can end on a full day)
+        LocalTime latestSubjectEnd = canonical.stream()
+                .filter(s -> s.type() == SlotKind.SUBJECT)
+                .map(CanonicalSlot::end)
+                .max(LocalTime::compareTo)
+                .orElse(cmd.schoolStartTime());
+
+        // For each isLastOfDay activity, find its start time on each of its days
+        LocalTime globalCutoff = null;
+        for (var act : lastActivities) {
+            List<DayOfWeek> actDays = act.isDaySpecific()
+                    ? operatingDays.stream().filter(d -> appliesToDay(act, d))
+                    .collect(Collectors.toList())
+                    : operatingDays; // global last activity applies to all days
+
+            for (DayOfWeek day : actDays) {
+                // Day-specific non-last minutes on this day
+                int dsNonLastMins = cmd.activities().stream()
+                        .filter(a -> a.isDaySpecific() && !a.isLast() && appliesToDay(a, day))
+                        .mapToInt(a -> a.slotsReplaced() * slotMins)
+                        .sum();
+
+                int slots = perDaySlots.getOrDefault(day, 0);
+                long minutesUsed = (long) globalMins + dsNonLastMins + (long) slots * slotMins;
+                LocalTime actStart = cmd.schoolStartTime().plusMinutes(minutesUsed);
+
+                if (globalCutoff == null || actStart.isBefore(globalCutoff))
+                    globalCutoff = actStart;
+            }
+        }
+
+        if (globalCutoff == null) return perDaySlots;
+
+        // Re-cap every day: subjects must end by globalCutoff
+        Map<DayOfWeek, Integer> capped = new LinkedHashMap<>();
+        for (DayOfWeek day : operatingDays) {
+            int dsNonLastMins = cmd.activities().stream()
+                    .filter(a -> a.isDaySpecific() && !a.isLast() && appliesToDay(a, day))
+                    .mapToInt(a -> a.slotsReplaced() * slotMins)
+                    .sum();
+            // How many subject slots fit before globalCutoff on this day?
+            long availMins = java.time.Duration.between(
+                    cmd.schoolStartTime(), globalCutoff).toMinutes()
+                    - globalMins - dsNonLastMins;
+            int maxSlots = availMins <= 0 ? 0 : (int) (availMins / slotMins);
+            capped.put(day, Math.min(perDaySlots.getOrDefault(day, 0), maxSlots));
+        }
+        return capped;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  Step 4 — Per-day templates from canonical baseline
+    // ═════════════════════════════════════════════════════════════════════
+
+    /**
+     * Builds the DayTemplate for each operating day.
+     *
+     * The canonical slot list defines clock times for all subject positions
+     * and global activities. For each day:
+     *   - Global activity slots are kept at exactly their canonical times.
+     *   - Day-specific non-last activities replace the subject slots they
+     *     consume, at those slots' canonical start times.
+     *   - Subject slots not consumed by day-specific activities remain.
+     *   - isLastOfDay activities are appended at the end.
+     *
+     * This guarantees Break is at 11:30am on EVERY day regardless of what
+     * day-specific activities exist on a given day.
      */
     private Map<DayOfWeek, DayTemplate> buildDayTemplates(
             GenerateTimetableCommand cmd,
             List<DayOfWeek> operatingDays,
-            DayTemplate baseTemplate,
-            Map<DayOfWeek, Integer> perDaySlots) {
+            List<CanonicalSlot> canonical,
+            Map<DayOfWeek, Integer> perDaySlots,
+            int slotMins) {
+
+        List<GenerateTimetableCommand.ActivitySpec> activities =
+                cmd.activities() == null ? List.of() : cmd.activities();
 
         Map<DayOfWeek, DayTemplate> result = new LinkedHashMap<>();
 
-        // Group day-specific activities by day
-        Map<DayOfWeek, List<GenerateTimetableCommand.DaySpecificActivitySpec>> byDay = new HashMap<>();
-        if (cmd.daySpecificActivities() != null) {
-            for (var act : cmd.daySpecificActivities()) {
-                for (String dayName : act.onlyOnDays()) {
-                    try {
-                        DayOfWeek day = DayOfWeek.valueOf(dayName.toUpperCase().trim());
-                        byDay.computeIfAbsent(day, k -> new ArrayList<>()).add(act);
-                    } catch (IllegalArgumentException ignored) {}
+        for (DayOfWeek day : operatingDays) {
+            int daySubjectSlots = perDaySlots.getOrDefault(day, 0);
+
+            // Day-specific non-last activities for this day, sorted by afterSlotNumber
+            List<GenerateTimetableCommand.ActivitySpec> dsActivities = activities.stream()
+                    .filter(a -> a.isDaySpecific() && !a.isLast() && appliesToDay(a, day))
+                    .sorted(Comparator.comparingInt(
+                            GenerateTimetableCommand.ActivitySpec::afterSlotNumber))
+                    .collect(Collectors.toList());
+
+            // Build a set of subject-slot indices consumed by day-specific activities.
+            // Activity with afterSlotNumber=N and periodsReplaced=P consumes slot indices N..N+P-1
+            // (0-indexed from the start of the day's subject slots).
+            // But we need to think carefully: afterSlotNumber means "replaces starting at slot N".
+            // Slots are 0-indexed in our canonical list.
+            Set<Integer> consumedSlots = new LinkedHashSet<>();
+            for (var act : dsActivities) {
+                int start = act.afterSlotNumber(); // 0-indexed slot position
+                int slots = act.slotsReplaced();
+                for (int i = start; i < start + slots; i++) consumedSlots.add(i);
+            }
+
+            // Walk canonical list, build the day's DaySlot list
+            List<DaySlot> daySlots = new ArrayList<>();
+            int subjectIdxInDay = 0;   // counts subject slots seen in canonical
+            int filledSubjects = 0;    // counts subject slots actually emitted for this day
+
+            // Map from consumed-slot-start → activity label+end for insertion
+            // Build: for each ds activity, map its afterSlotNumber → (label, minutesTotal)
+            Map<Integer, List<GenerateTimetableCommand.ActivitySpec>> actsBySlot = new LinkedHashMap<>();
+            for (var act : dsActivities) {
+                actsBySlot.computeIfAbsent(act.afterSlotNumber(), k -> new ArrayList<>()).add(act);
+            }
+
+            for (CanonicalSlot cs : canonical) {
+                if (cs.type() == SlotKind.GLOBAL_ACTIVITY
+                        || cs.type() == SlotKind.GLOBAL_LAST_ACTIVITY) {
+                    // Global activity: emit at canonical clock time, always
+                    daySlots.add(new DaySlot(DaySlotType.ACTIVITY, cs.start(), cs.end(), cs.label()));
+                } else {
+                    // SUBJECT slot in canonical
+                    int idx = subjectIdxInDay;
+
+                    // Check if a day-specific activity starts at this slot position
+                    List<GenerateTimetableCommand.ActivitySpec> actsHere = actsBySlot.get(idx);
+                    if (actsHere != null) {
+                        // Insert day-specific activity(ies) starting at canonical start of this slot
+                        LocalTime actCursor = cs.start();
+                        for (var act : actsHere) {
+                            int actMins = act.slotsReplaced() * slotMins;
+                            LocalTime actEnd = actCursor.plusMinutes(actMins);
+                            daySlots.add(new DaySlot(DaySlotType.ACTIVITY, actCursor, actEnd, act.label()));
+                            actCursor = actEnd;
+                        }
+                        // Skip the consumed canonical subject slots
+                        int skip = actsHere.stream()
+                                .mapToInt(GenerateTimetableCommand.ActivitySpec::slotsReplaced).sum();
+                        // Advance subjectIdxInDay past all consumed slots
+                        subjectIdxInDay += skip;
+                        // Also skip the remaining canonical subject entries for these slots
+                        // (handled by the subjectIdxInDay check below for subsequent canonicals)
+                    } else if (!consumedSlots.contains(idx) && filledSubjects < daySubjectSlots) {
+                        // Regular subject slot for this day
+                        daySlots.add(new DaySlot(DaySlotType.SUBJECT, cs.start(), cs.end(), null));
+                        filledSubjects++;
+                        subjectIdxInDay++;
+                    } else if (consumedSlots.contains(idx)) {
+                        // This canonical slot was consumed by a preceding multi-slot activity
+                        subjectIdxInDay++;
+                    } else {
+                        // Surplus slot (filledSubjects >= daySubjectSlots) — skip
+                        subjectIdxInDay++;
+                    }
                 }
             }
-            // Sort each day's activities by afterSlotNumber
-            for (var entry : byDay.entrySet()) {
-                entry.getValue().sort(Comparator.comparingInt(
-                        GenerateTimetableCommand.DaySpecificActivitySpec::afterSlotNumber));
+
+            // Append isLastOfDay day-specific activities
+            LocalTime lastEnd = daySlots.isEmpty()
+                    ? cmd.schoolStartTime()
+                    : daySlots.get(daySlots.size() - 1).end();
+            for (var act : activities.stream()
+                    .filter(a -> a.isDaySpecific() && a.isLast() && appliesToDay(a, day))
+                    .sorted(Comparator.comparingInt(
+                            GenerateTimetableCommand.ActivitySpec::afterSlotNumber))
+                    .toList()) {
+                LocalTime end = lastEnd.plusMinutes(act.slotsReplaced() * slotMins);
+                daySlots.add(new DaySlot(DaySlotType.ACTIVITY, lastEnd, end, act.label()));
+                lastEnd = end;
             }
-        }
 
-        for (DayOfWeek day : operatingDays) {
-            int targetSlots = perDaySlots.get(day);
-            List<GenerateTimetableCommand.DaySpecificActivitySpec> daySpecific =
-                    byDay.getOrDefault(day, List.of());
-
-            DayTemplate dayTemplate = applyReplacements(
-                    baseTemplate, daySpecific, targetSlots, cmd.slotDurationMinutes());
-            result.put(day, dayTemplate);
+            result.put(day, new DayTemplate(daySlots, daySubjectSlots));
         }
         return result;
     }
 
-    /**
-     * Applies day-specific activity replacements to the base template.
-     *
-     * Day-specific activities REPLACE subject slots at specific positions.
-     * The afterSlotNumber refers to the position among REMAINING subject slots
-     * after previous replacements.
-     */
-    private DayTemplate applyReplacements(
-            DayTemplate baseTemplate,
-            List<GenerateTimetableCommand.DaySpecificActivitySpec> replacements,
-            int targetSubjectSlots,
-            int slotDurationMinutes) {
-
-        if (replacements.isEmpty()) {
-            // No replacements — just trim/pad subject slots to target count
-            return trimToSubjectSlots(baseTemplate, targetSubjectSlots);
+    private boolean appliesToDay(GenerateTimetableCommand.ActivitySpec spec, DayOfWeek day) {
+        if (!spec.isDaySpecific()) return true;
+        for (String d : spec.onlyOnDays()) {
+            try { if (DayOfWeek.valueOf(d.toUpperCase().trim()) == day) return true; }
+            catch (IllegalArgumentException ignored) {}
         }
-
-        List<DaySlot> resultSlots = new ArrayList<>();
-        int subjectCount = 0;
-        int replaceIdx = 0;
-        LocalTime cursor = baseTemplate.slots().get(0).start();
-
-        // Separate last-of-day activities
-        List<GenerateTimetableCommand.DaySpecificActivitySpec> lastActivities = replacements.stream()
-                .filter(GenerateTimetableCommand.DaySpecificActivitySpec::isLast)
-                .toList();
-        List<GenerateTimetableCommand.DaySpecificActivitySpec> positioned = replacements.stream()
-                .filter(r -> !r.isLast())
-                .toList();
-
-        for (DaySlot slot : baseTemplate.slots()) {
-            if (slot.type() == DaySlotType.ACTIVITY) {
-                // Global activity — keep as-is
-                resultSlots.add(new DaySlot(DaySlotType.ACTIVITY, cursor, slot.end(), slot.label()));
-                cursor = slot.end();
-            } else {
-                // SUBJECT slot
-                // Check if this position should be replaced
-                if (replaceIdx < positioned.size()
-                        && positioned.get(replaceIdx).afterSlotNumber() == subjectCount) {
-                    var act = positioned.get(replaceIdx);
-                    int durationMins = act.replacesSlots() * slotDurationMinutes;
-                    LocalTime actEnd = cursor.plusMinutes(durationMins);
-                    resultSlots.add(new DaySlot(DaySlotType.ACTIVITY, cursor, actEnd, act.label()));
-                    cursor = actEnd;
-                    replaceIdx++;
-                    subjectCount += act.replacesSlots();
-                } else if (subjectCount < targetSubjectSlots) {
-                    // Regular subject slot
-                    LocalTime slotEnd = cursor.plusMinutes(slotDurationMinutes);
-                    resultSlots.add(new DaySlot(DaySlotType.SUBJECT, cursor, slotEnd, null));
-                    cursor = slotEnd;
-                    subjectCount++;
-                }
-                // If subjectCount >= targetSubjectSlots, skip remaining subject slots
-            }
-        }
-
-        // Add last-of-day activities at the end
-        for (var act : lastActivities) {
-            int durationMins = act.replacesSlots() * slotDurationMinutes;
-            LocalTime actEnd = cursor.plusMinutes(durationMins);
-            resultSlots.add(new DaySlot(DaySlotType.ACTIVITY, cursor, actEnd, act.label()));
-            cursor = actEnd;
-        }
-
-        return new DayTemplate(resultSlots, targetSubjectSlots);
+        return false;
     }
 
-    /**
-     * Trims or pads the base template to have exactly targetSubjectSlots subject slots.
-     */
-    private DayTemplate trimToSubjectSlots(DayTemplate base, int targetSubjectSlots) {
-        List<DaySlot> result = new ArrayList<>();
-        int subjectCount = 0;
-        LocalTime cursor = base.slots().get(0).start();
-
-        for (DaySlot slot : base.slots()) {
-            if (slot.type() == DaySlotType.ACTIVITY) {
-                result.add(new DaySlot(DaySlotType.ACTIVITY, cursor, slot.end(), slot.label()));
-                cursor = slot.end();
-            } else if (subjectCount < targetSubjectSlots) {
-                LocalTime slotEnd = cursor.plusMinutes(
-                        (int) java.time.Duration.between(slot.start(), slot.end()).toMinutes());
-                result.add(new DaySlot(DaySlotType.SUBJECT, cursor, slotEnd, null));
-                cursor = slotEnd;
-                subjectCount++;
-            }
-            // Skip additional subject slots beyond target
-        }
-        return new DayTemplate(result, targetSubjectSlots);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    //  Phase 1 — Day assignment
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    //  Phase 1 — Day assignment (backtracking CSP)
+    // ═════════════════════════════════════════════════════════════════════
 
     private Map<DayOfWeek, List<Occurrence>> phase1DayAssign(
             List<Occurrence> occurrences, List<DayOfWeek> operatingDays,
@@ -444,11 +550,10 @@ public class GenerateTimetableHandler
         for (DayOfWeek d : operatingDays) result.put(d, new ArrayList<>());
 
         List<Occurrence> ordered = sortByConstrainedness(
-                occurrences, operatingDays, perDaySlots,
-                unavailable, occupied, baseTemplate, rng);
+                occurrences, operatingDays, perDaySlots, unavailable, occupied, baseTemplate, rng);
 
         return p1Backtrack(ordered, 0, result, freeSlots, subjectDays,
-                operatingDays, perDaySlots, unavailable, occupied, baseTemplate);
+                operatingDays, unavailable, occupied, baseTemplate);
     }
 
     private Map<DayOfWeek, List<Occurrence>> p1Backtrack(
@@ -457,7 +562,6 @@ public class GenerateTimetableHandler
             Map<DayOfWeek, Integer> freeSlots,
             Map<Long, Set<DayOfWeek>> subjectDays,
             List<DayOfWeek> operatingDays,
-            Map<DayOfWeek, Integer> perDaySlots,
             Map<Long, Set<DayOfWeek>> unavailable,
             List<OccupiedInterval> occupied,
             DayTemplate baseTemplate) {
@@ -467,25 +571,24 @@ public class GenerateTimetableHandler
         int needed = occ.isDouble() ? 2 : 1;
         Long teacherId = occ.teacherId();
 
-        List<DayOfWeek> shuffledDays = new ArrayList<>(operatingDays);
-        Collections.shuffle(shuffledDays);
+        List<DayOfWeek> shuffled = new ArrayList<>(operatingDays);
+        Collections.shuffle(shuffled);
 
-        for (DayOfWeek day : shuffledDays) {
-            if (subjectDays.getOrDefault(occ.classSubjectId(), Set.of()).contains(day))
-                continue;
+        for (DayOfWeek day : shuffled) {
+            if (subjectDays.getOrDefault(occ.classSubjectId(), Set.of()).contains(day)) continue;
             if (teacherId != null
-                    && unavailable.getOrDefault(teacherId, Set.of()).contains(day))
-                continue;
+                    && unavailable.getOrDefault(teacherId, Set.of()).contains(day)) continue;
             if (freeSlots.getOrDefault(day, 0) < needed) continue;
-            if (teacherId != null && isTeacherFullyBlockedOnDay(
-                    teacherId, day, needed, baseTemplate, occupied)) continue;
+            if (teacherId != null
+                    && isTeacherFullyBlockedOnDay(teacherId, day, needed, baseTemplate, occupied))
+                continue;
 
             assignment.get(day).add(occ);
             freeSlots.merge(day, -needed, Integer::sum);
             subjectDays.computeIfAbsent(occ.classSubjectId(), k -> new HashSet<>()).add(day);
 
             var sub = p1Backtrack(occs, idx + 1, assignment, freeSlots, subjectDays,
-                    operatingDays, perDaySlots, unavailable, occupied, baseTemplate);
+                    operatingDays, unavailable, occupied, baseTemplate);
             if (sub != null) return sub;
 
             assignment.get(day).remove(occ);
@@ -495,9 +598,9 @@ public class GenerateTimetableHandler
         return null;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
     //  Phase 2 — Slot placement within each day
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
 
     private Map<DayOfWeek, List<PlacedSlot>> phase2SlotPlace(
             Map<DayOfWeek, List<Occurrence>> dayAssignment,
@@ -509,10 +612,7 @@ public class GenerateTimetableHandler
         Map<DayOfWeek, List<PlacedSlot>> result = new LinkedHashMap<>();
         for (DayOfWeek day : operatingDays) {
             List<Occurrence> occs = dayAssignment.getOrDefault(day, List.of());
-            if (occs.isEmpty()) {
-                result.put(day, List.of());
-                continue;
-            }
+            if (occs.isEmpty()) { result.put(day, List.of()); continue; }
             List<PlacedSlot> placed = p2PlaceDay(
                     day, occs, templates.get(day), subjectById, occupied, rng);
             if (placed == null) return null;
@@ -527,10 +627,10 @@ public class GenerateTimetableHandler
             List<OccupiedInterval> occupied, Random rng) {
 
         int n = template.subjectSlotCount();
-        Long[] slotAssign = new Long[n];
-        boolean[] isDouble = new boolean[n];
+        Long[]    slotAssign = new Long[n];
+        boolean[] isDouble   = new boolean[n];
 
-        Set<Integer> activityBoundaries = activityBoundarySet(template);
+        Set<Integer> actBoundaries = activityBoundarySet(template);
 
         List<Occurrence> doubles = occs.stream().filter(Occurrence::isDouble)
                 .collect(Collectors.toList());
@@ -539,20 +639,16 @@ public class GenerateTimetableHandler
         Collections.shuffle(doubles, rng);
         Collections.shuffle(singles, rng);
 
-        // Place doubles
         for (Occurrence d : doubles) {
             Long tid = d.teacherId();
             List<Integer> candidates = buildDoubleCandidates(
-                    n, slotAssign, activityBoundaries, tid, day, template, occupied);
+                    n, slotAssign, actBoundaries, tid, day, template, occupied);
             if (candidates.isEmpty()) return null;
             int pos = candidates.get(0);
-            slotAssign[pos] = d.classSubjectId();
-            slotAssign[pos + 1] = d.classSubjectId();
-            isDouble[pos] = true;
-            isDouble[pos + 1] = true;
+            slotAssign[pos] = slotAssign[pos + 1] = d.classSubjectId();
+            isDouble[pos] = isDouble[pos + 1] = true;
         }
 
-        // Place singles
         List<Integer> freePos = new ArrayList<>();
         for (int i = 0; i < n; i++) if (slotAssign[i] == null) freePos.add(i);
         Collections.shuffle(freePos, rng);
@@ -562,8 +658,8 @@ public class GenerateTimetableHandler
             Long tid = s.teacherId();
             for (int pos : freePos) {
                 if (slotAssign[pos] != null) continue;
-                if (tid != null && hasConflict(
-                        occupied, tid, day, template.subjectSlotTime(pos))) continue;
+                if (tid != null && hasConflict(occupied, tid, day, template.subjectSlotTime(pos)))
+                    continue;
                 slotAssign[pos] = s.classSubjectId();
                 placed = true;
                 break;
@@ -584,33 +680,30 @@ public class GenerateTimetableHandler
         Set<Integer> boundaries = new HashSet<>();
         int subIdx = -1;
         for (DaySlot ds : template.slots()) {
-            if (ds.type() == DaySlotType.SUBJECT) {
-                subIdx++;
-            } else if (subIdx >= 0) {
-                boundaries.add(subIdx);
-            }
+            if (ds.type() == DaySlotType.SUBJECT) subIdx++;
+            else if (subIdx >= 0)                  boundaries.add(subIdx);
         }
         return boundaries;
     }
 
     private List<Integer> buildDoubleCandidates(
-            int n, Long[] slotAssign, Set<Integer> activityBoundaries,
+            int n, Long[] slotAssign, Set<Integer> actBoundaries,
             Long teacherId, DayOfWeek day, DayTemplate template,
             List<OccupiedInterval> occupied) {
 
         List<Integer> preferred = new ArrayList<>();
-        List<Integer> normal = new ArrayList<>();
+        List<Integer> normal    = new ArrayList<>();
 
         for (int pos = 0; pos < n - 1; pos++) {
             if (slotAssign[pos] != null || slotAssign[pos + 1] != null) continue;
-            if (activityBoundaries.contains(pos)) continue;
+            if (actBoundaries.contains(pos)) continue;
             if (teacherId != null) {
                 if (hasConflict(occupied, teacherId, day, template.subjectSlotTime(pos))
                         || hasConflict(occupied, teacherId, day, template.subjectSlotTime(pos + 1)))
                     continue;
             }
-            if (activityBoundaries.contains(pos + 1)) preferred.add(pos);
-            else normal.add(pos);
+            if (actBoundaries.contains(pos + 1)) preferred.add(pos);
+            else                                  normal.add(pos);
         }
         List<Integer> result = new ArrayList<>(preferred);
         result.addAll(normal);
@@ -636,92 +729,57 @@ public class GenerateTimetableHandler
                 if (isDouble[i + 2] && slots[i + 1].equals(slots[i + 2])) continue;
                 Long tC = getTeacherId(subjectById.get(slots[i + 2]));
                 if (tC != null && !tC.equals(tA)) {
-                    Long tmp = slots[i + 1];
-                    slots[i + 1] = slots[i + 2];
-                    slots[i + 2] = tmp;
-                    boolean tmpB = isDouble[i + 1];
-                    isDouble[i + 1] = isDouble[i + 2];
-                    isDouble[i + 2] = tmpB;
+                    Long tmp  = slots[i + 1];    slots[i + 1]    = slots[i + 2];    slots[i + 2]    = tmp;
+                    boolean t = isDouble[i + 1]; isDouble[i + 1] = isDouble[i + 2]; isDouble[i + 2] = t;
                     improved = true;
                 }
             }
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Occurrence building
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    //  End-time balancing
+    // ═════════════════════════════════════════════════════════════════════
 
-    private List<Occurrence> buildOccurrences(
-            List<GenerateTimetableCommand.SubjectFrequency> frequencies,
-            Map<Long, ClassSubjectEntity> subjectById, int numDays) {
+    private Map<DayOfWeek, List<PlacedSlot>> balanceEndTimes(
+            Map<DayOfWeek, List<PlacedSlot>> placed,
+            List<DayOfWeek> operatingDays,
+            Map<DayOfWeek, Integer> perDaySlots) {
 
-        List<Occurrence> all = new ArrayList<>();
-        Set<Long> covered = new HashSet<>();
+        Map<DayOfWeek, Integer> lastIdx = new LinkedHashMap<>();
+        for (DayOfWeek day : operatingDays)
+            lastIdx.put(day, placed.getOrDefault(day, List.of()).stream()
+                    .mapToInt(PlacedSlot::position).max().orElse(-1));
 
-        for (var freq : frequencies) {
-            Long csId = freq.classSubjectId();
-            if (!subjectById.containsKey(csId)) {
-                throw new BusinessRuleViolationException(
-                        "ClassSubject id=" + csId + " not in this class-session.");
+        int maxLast = lastIdx.values().stream().mapToInt(Integer::intValue).max().orElse(0);
+
+        Map<DayOfWeek, List<PlacedSlot>> result = new LinkedHashMap<>();
+        for (DayOfWeek day : operatingDays) {
+            int last   = lastIdx.getOrDefault(day, -1);
+            int gap    = maxLast - last;
+            int dayMax = perDaySlots.getOrDefault(day, maxLast + 1) - 1;
+
+            if (gap <= 2 || last < 0) { result.put(day, placed.getOrDefault(day, List.of())); continue; }
+
+            int shift = Math.min(gap - 2, dayMax - last);
+            if (shift <= 0) { result.put(day, placed.getOrDefault(day, List.of())); continue; }
+
+            Set<Integer> used = new HashSet<>();
+            List<PlacedSlot> shifted = new ArrayList<>();
+            for (PlacedSlot ps : placed.get(day)) {
+                int pos = Math.min(ps.position() + shift, dayMax);
+                while (used.contains(pos) && pos > 0) pos--;
+                used.add(pos);
+                shifted.add(new PlacedSlot(ps.classSubjectId(), pos, ps.isDouble()));
             }
-            int periods = freq.periodsPerWeek();
-            if (periods < 1) {
-                throw new BusinessRuleViolationException(
-                        "periodsPerWeek ≥ 1 required for classSubjectId=" + csId);
-            }
-
-            ClassSubjectEntity cs = subjectById.get(csId);
-            boolean forceDouble = Boolean.TRUE.equals(freq.forceDouble());
-            List<Occurrence> occs = deriveOccurrences(csId, getTeacherId(cs), periods, forceDouble);
-
-            if (occs.size() > numDays) {
-                throw new BusinessRuleViolationException(
-                        "Subject id=" + csId + " needs " + occs.size()
-                                + " occurrences but only " + numDays + " days available.");
-            }
-            all.addAll(occs);
-            covered.add(csId);
+            result.put(day, shifted);
         }
-
-        List<String> omitted = subjectById.values().stream()
-                .filter(cs -> !covered.contains(cs.getId()))
-                .map(cs -> "'" + (cs.getSubject() != null
-                        ? cs.getSubject().getName() : "id=" + cs.getId())
-                        + "' (classSubjectId=" + cs.getId() + ")")
-                .collect(Collectors.toList());
-        if (!omitted.isEmpty()) {
-            throw new BusinessRuleViolationException(
-                    "Missing from subjectFrequencies: " + String.join(", ", omitted));
-        }
-        return all;
+        return result;
     }
 
-    private List<Occurrence> deriveOccurrences(
-            Long csId, Long teacherId, int periods, boolean forceDouble) {
-
-        List<Occurrence> r = new ArrayList<>();
-        if (periods == 1) {
-            r.add(new Occurrence(csId, teacherId, false));
-        } else if (periods == 2) {
-            if (forceDouble) {
-                r.add(new Occurrence(csId, teacherId, true));
-            } else {
-                r.add(new Occurrence(csId, teacherId, false));
-                r.add(new Occurrence(csId, teacherId, false));
-            }
-        } else {
-            for (int i = 0; i < periods / 2; i++)
-                r.add(new Occurrence(csId, teacherId, true));
-            for (int i = 0; i < periods % 2; i++)
-                r.add(new Occurrence(csId, teacherId, false));
-        }
-        return r;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    //  Entity conversion
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    //  Entity conversion — compact packing (no blank gaps)
+    // ═════════════════════════════════════════════════════════════════════
 
     private List<TimetableSlotEntity> buildEntities(
             Map<DayOfWeek, List<PlacedSlot>> placed,
@@ -736,24 +794,24 @@ public class GenerateTimetableHandler
         for (DayOfWeek day : operatingDays) {
             DayTemplate template = templates.get(day);
 
-            List<Long> orderedSubjects = placed.getOrDefault(day, List.of())
-                    .stream()
+            // Sort placed slots by position and queue them
+            List<Long> subjectQueue = placed.getOrDefault(day, List.of()).stream()
                     .sorted(Comparator.comparingInt(PlacedSlot::position))
                     .map(PlacedSlot::classSubjectId)
-                    .toList();
+                    .collect(Collectors.toList());
 
-            int subjectQueue = 0;
+            int qIdx = 0;
             for (DaySlot ds : template.slots()) {
                 if (ds.type() == DaySlotType.ACTIVITY) {
                     result.add(TimetableSlotEntity.builder()
                             .schoolId(schoolId).dayOfWeek(day)
                             .startTime(ds.start()).endTime(ds.end())
-                            .slotType(SlotType.ACTIVITY)
-                            .activityLabel(ds.label())
+                            .slotType(SlotType.ACTIVITY).activityLabel(ds.label())
                             .sortOrder(sortOrder++).build());
                 } else {
-                    if (subjectQueue < orderedSubjects.size()) {
-                        Long csId = orderedSubjects.get(subjectQueue++);
+                    // SUBJECT slot — emit from queue; skip if exhausted (surplus slot)
+                    if (qIdx < subjectQueue.size()) {
+                        Long csId = subjectQueue.get(qIdx++);
                         result.add(TimetableSlotEntity.builder()
                                 .schoolId(schoolId).dayOfWeek(day)
                                 .startTime(ds.start()).endTime(ds.end())
@@ -761,15 +819,77 @@ public class GenerateTimetableHandler
                                 .classSubject(subjectById.get(csId))
                                 .sortOrder(sortOrder++).build());
                     }
+                    // Surplus: no entity emitted, no blank gap in output
                 }
             }
         }
         return result;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    //  Helpers
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
+    //  Occurrence building
+    // ═════════════════════════════════════════════════════════════════════
+
+    private List<Occurrence> buildOccurrences(
+            List<GenerateTimetableCommand.SubjectFrequency> frequencies,
+            Map<Long, ClassSubjectEntity> subjectById, int numDays) {
+
+        List<Occurrence> all = new ArrayList<>();
+        Set<Long> covered = new HashSet<>();
+
+        for (var freq : frequencies) {
+            Long csId = freq.classSubjectId();
+            if (!subjectById.containsKey(csId))
+                throw new BusinessRuleViolationException(
+                        "ClassSubject id=" + csId + " not in this class-session.");
+            int periods = freq.periodsPerWeek();
+            if (periods < 1)
+                throw new BusinessRuleViolationException(
+                        "periodsPerWeek ≥ 1 required for classSubjectId=" + csId);
+
+            boolean forceDouble = Boolean.TRUE.equals(freq.forceDouble());
+            List<Occurrence> occs = deriveOccurrences(
+                    csId, getTeacherId(subjectById.get(csId)), periods, forceDouble);
+
+            if (occs.size() > numDays)
+                throw new BusinessRuleViolationException(
+                        "Subject id=" + csId + " needs " + occs.size()
+                                + " occurrences but only " + numDays + " days available.");
+
+            all.addAll(occs);
+            covered.add(csId);
+        }
+
+        List<String> omitted = subjectById.values().stream()
+                .filter(cs -> !covered.contains(cs.getId()))
+                .map(cs -> "'" + (cs.getSubject() != null ? cs.getSubject().getName()
+                        : "id=" + cs.getId()) + "' (classSubjectId=" + cs.getId() + ")")
+                .collect(Collectors.toList());
+        if (!omitted.isEmpty())
+            throw new BusinessRuleViolationException(
+                    "Missing from subjectFrequencies: " + String.join(", ", omitted));
+
+        return all;
+    }
+
+    private List<Occurrence> deriveOccurrences(
+            Long csId, Long teacherId, int periods, boolean forceDouble) {
+        List<Occurrence> r = new ArrayList<>();
+        if (periods == 1) {
+            r.add(new Occurrence(csId, teacherId, false));
+        } else if (periods == 2) {
+            if (forceDouble) r.add(new Occurrence(csId, teacherId, true));
+            else { r.add(new Occurrence(csId, teacherId, false)); r.add(new Occurrence(csId, teacherId, false)); }
+        } else {
+            for (int i = 0; i < periods / 2; i++) r.add(new Occurrence(csId, teacherId, true));
+            for (int i = 0; i < periods % 2; i++) r.add(new Occurrence(csId, teacherId, false));
+        }
+        return r;
+    }
+
+    // ═════════════════════════════════════════════════════════════════════
+    //  Utilities
+    // ═════════════════════════════════════════════════════════════════════
 
     private List<Occurrence> sortByConstrainedness(
             List<Occurrence> occs, List<DayOfWeek> days,
@@ -788,8 +908,7 @@ public class GenerateTimetableHandler
                 if (perDaySlots.getOrDefault(d, 0) < needed) continue;
                 if (tid != null) {
                     if (unavailable.getOrDefault(tid, Set.of()).contains(d)) continue;
-                    if (isTeacherFullyBlockedOnDay(tid, d, needed, baseTemplate, occupied))
-                        continue;
+                    if (isTeacherFullyBlockedOnDay(tid, d, needed, baseTemplate, occupied)) continue;
                 }
                 legal++;
             }
@@ -803,8 +922,7 @@ public class GenerateTimetableHandler
             DayTemplate template, List<OccupiedInterval> occupied) {
         int free = 0;
         for (int i = 0; i < template.subjectSlotCount(); i++) {
-            if (!hasConflict(occupied, teacherId, day, template.subjectSlotTime(i)))
-                free++;
+            if (!hasConflict(occupied, teacherId, day, template.subjectSlotTime(i))) free++;
             if (free >= needed) return false;
         }
         return true;
@@ -819,10 +937,9 @@ public class GenerateTimetableHandler
         return false;
     }
 
-    private List<OccupiedInterval> loadOccupiedIntervals(
-            Long schoolId, Long excludeClassSessionId) {
-        return slotRepo.findAllActiveSubjectSlotsForSchoolExcludingClass(
-                        schoolId, excludeClassSessionId).stream()
+    private List<OccupiedInterval> loadOccupiedIntervals(Long schoolId, Long excludeCs) {
+        return slotRepo.findAllActiveSubjectSlotsForSchoolExcludingClass(schoolId, excludeCs)
+                .stream()
                 .filter(s -> s.getClassSubject() != null
                         && s.getClassSubject().getTeacherAssignment() != null)
                 .map(s -> new OccupiedInterval(
@@ -831,31 +948,27 @@ public class GenerateTimetableHandler
                 .collect(Collectors.toList());
     }
 
-    private void validateFeasibility(
-            List<Occurrence> occs, List<DayOfWeek> days,
-            Map<DayOfWeek, Integer> perDaySlots) {
+    private void validateFeasibility(List<Occurrence> occs,
+                                     List<DayOfWeek> days,
+                                     Map<DayOfWeek, Integer> perDaySlots) {
         int total = occs.stream().mapToInt(o -> o.isDouble() ? 2 : 1).sum();
         int avail = perDaySlots.values().stream().mapToInt(Integer::intValue).sum();
-        if (total > avail) {
+        if (total > avail)
             throw new BusinessRuleViolationException(
-                    "Total periods (" + total + ") exceed total available slots ("
-                            + avail + ") across all days. Reduce periodsPerWeek, "
-                            + "extend closing time, or reduce day-specific activity durations.");
-        }
+                    "Total periods (" + total + ") exceed available slots (" + avail
+                            + "). Reduce periodsPerWeek or day-specific activity periods.");
     }
 
     private List<DayOfWeek> parseOperatingDays(List<String> raw) {
         List<DayOfWeek> result = new ArrayList<>();
         for (String d : raw) {
-            try {
-                result.add(DayOfWeek.valueOf(d.toUpperCase().trim()));
-            } catch (IllegalArgumentException e) {
+            try { result.add(DayOfWeek.valueOf(d.toUpperCase().trim())); }
+            catch (IllegalArgumentException e) {
                 throw new BusinessRuleViolationException("Invalid day: '" + d + "'");
             }
         }
-        if (result.isEmpty()) {
+        if (result.isEmpty())
             throw new BusinessRuleViolationException("At least one operating day is required.");
-        }
         return result;
     }
 
@@ -866,9 +979,8 @@ public class GenerateTimetableHandler
         for (var spec : specs) {
             Set<DayOfWeek> days = new HashSet<>();
             for (String d : spec.unavailableDays()) {
-                try {
-                    days.add(DayOfWeek.valueOf(d.toUpperCase().trim()));
-                } catch (IllegalArgumentException e) {
+                try { days.add(DayOfWeek.valueOf(d.toUpperCase().trim())); }
+                catch (IllegalArgumentException e) {
                     throw new BusinessRuleViolationException(
                             "Invalid day for teacher " + spec.teacherId() + ": '" + d + "'");
                 }
@@ -884,45 +996,38 @@ public class GenerateTimetableHandler
         return s.getTeacherAssignment().getTeacher().getId();
     }
 
-    private String diagnose(
-            List<Occurrence> occs, Map<Long, ClassSubjectEntity> subjectById,
-            List<DayOfWeek> days, Map<Long, Set<DayOfWeek>> unavailable,
-            List<OccupiedInterval> occupied, DayTemplate template) {
-
+    private String diagnose(List<Occurrence> occs, Map<Long, ClassSubjectEntity> subjectById,
+                            List<DayOfWeek> days, Map<Long, Set<DayOfWeek>> unavailable,
+                            List<OccupiedInterval> occupied, DayTemplate template, int slotsPerDay) {
         StringBuilder sb = new StringBuilder();
         Set<Long> seen = new HashSet<>();
         for (Occurrence o : occs) {
             if (!seen.add(o.classSubjectId())) continue;
             ClassSubjectEntity cs = subjectById.get(o.classSubjectId());
-            String name = cs.getSubject() != null
-                    ? cs.getSubject().getName() : "id=" + o.classSubjectId();
+            String name = cs.getSubject() != null ? cs.getSubject().getName() : "id=" + o.classSubjectId();
             Long tid = o.teacherId();
-            if (tid == null) {
-                sb.append("• '").append(name).append("' has no teacher assigned.\n");
-                continue;
-            }
+            if (tid == null) { sb.append("• '").append(name).append("' has no teacher.\n"); continue; }
             long free = days.stream()
                     .filter(d -> !unavailable.getOrDefault(tid, Set.of()).contains(d))
                     .filter(d -> !isTeacherFullyBlockedOnDay(tid, d, 1, template, occupied))
                     .count();
-            if (free == 0) {
-                sb.append("• Teacher of '").append(name)
-                        .append("' has no available days.\n");
-            }
+            if (free == 0)
+                sb.append("• Teacher of '").append(name).append("' has no available days.\n");
         }
-        if (sb.isEmpty()) {
+        if (sb.isEmpty())
             sb.append("Reduce periodsPerWeek, add more days, or vary teacher assignments.");
-        }
         return sb.toString();
     }
 
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
     //  Value types
-    // ─────────────────────────────────────────────────────────────────────
+    // ═════════════════════════════════════════════════════════════════════
 
     private record Occurrence(Long classSubjectId, Long teacherId, boolean isDouble) {}
     private record OccupiedInterval(Long teacherId, DayOfWeek day, LocalTime start, LocalTime end) {}
-    private enum DaySlotType { SUBJECT, ACTIVITY }
+    private enum SlotKind        { SUBJECT, GLOBAL_ACTIVITY, GLOBAL_LAST_ACTIVITY }
+    private enum DaySlotType     { SUBJECT, ACTIVITY }
+    private record CanonicalSlot(SlotKind type, LocalTime start, LocalTime end, String label, int subjectIdx) {}
     private record DaySlot(DaySlotType type, LocalTime start, LocalTime end, String label) {}
     private record DayTemplate(List<DaySlot> slots, int subjectSlotCount) {
         SlotTime subjectSlotTime(int idx) {
