@@ -513,7 +513,7 @@ public class GenerateTimetableHandler
                     .filter(a -> a.isDaySpecific() && a.isLast() && appliesToDay(a, day))
                     .sorted(Comparator.comparingInt(
                             GenerateTimetableCommand.ActivitySpec::afterSlotNumber))
-                    .toList()) {
+                    .collect(Collectors.toList())) {
                 LocalTime end = lastEnd.plusMinutes(act.slotsReplaced() * slotMins);
                 daySlots.add(new DaySlot(DaySlotType.ACTIVITY, lastEnd, end, act.label()));
                 lastEnd = end;

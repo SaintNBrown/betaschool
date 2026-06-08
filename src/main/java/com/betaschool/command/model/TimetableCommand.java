@@ -112,48 +112,55 @@ public sealed interface TimetableCommand {
     ) implements Command<Long>, TimetableCommand {
 
         /**
-         * An activity block in the school day.
+         * Describes one activity block.
          *
-         * afterSlotNumber:
-         *   0          = before all subject slots (first in day)
-         *   N          = after the Nth subject slot
-         *   large int  = after all subject slots (last)
+         * GLOBAL activities (onlyOnDays null/empty):
+         *   durationMinutes — actual clock duration in minutes (e.g. Break = 30).
+         *   afterSlotNumber — subject slot after which this appears (0 = before all subjects).
+         *   These activities are anchored to the same clock time on EVERY operating day.
+         *   They never shift due to day-specific activities on other days.
          *
-         * isLastOfDay (optional): when true this activity is always placed at
-         *   the end of the day, after all subject slots, regardless of
-         *   afterSlotNumber. Useful for end-of-day assemblies or dismissal
-         *   routines that must come last.
-         *
-         * onlyOnDays (optional):
-         *   null/empty  = global activity — appears on every operating day,
-         *                 does NOT replace subject slots.
-         *   populated   = day-specific activity — appears ONLY on those days
-         *                 AND replaces subject slots (the activity time is
-         *                 carved out of the subject-slot budget for those days).
-         *                 Example: Sports (80 min) on Thursday replaces 2 subject
-         *                 slots on Thursday; other days keep their full slot count.
+         * DAY-SPECIFIC activities (onlyOnDays populated):
+         *   periodsReplaced — how many subject slot periods this activity occupies
+         *                     (e.g. Sports replaces 1 period, Recreational replaces 2).
+         *                     The generator converts this to minutes:
+         *                       actualMinutes = periodsReplaced × slotDurationMinutes
+         *   afterSlotNumber — which subject slot position this activity is placed at on its days.
+         *   durationMinutes — ignored for day-specific activities; use periodsReplaced instead.
+         *   isLastOfDay     — when true, placed after all subjects on its days.
+         *                     The latest-ending isLastOfDay activity on any day defines the
+         *                     latest any subject can end on ALL days (cross-day cap).
          */
         public record ActivitySpec(
                 @NotNull String label,
-                @NotNull Integer durationMinutes,
+                /** Minutes for global activities. Ignored for day-specific — use periodsReplaced. */
+                Integer durationMinutes,
                 @NotNull Integer afterSlotNumber,
-                /** When true, always placed last regardless of afterSlotNumber. */
+                /** For day-specific activities: how many subject slot periods this replaces. */
+                Integer periodsReplaced,
+                /** When true, always placed after all subjects on its days. */
                 Boolean isLastOfDay,
-                /** Null/empty = all days, no slot replacement. Populated = those days only, replaces slots. */
-                List<String> onlyOnDays,
-                @NotNull Integer slotsReplaced
-
+                /** Null/empty = global (all days). Populated = day-specific (replaces slots). */
+                List<String> onlyOnDays
         ) {
-            /** Whether this activity is day-specific (replaces slots on its days). */
             public boolean isDaySpecific() {
                 return onlyOnDays != null && !onlyOnDays.isEmpty();
             }
             public boolean isLast() {
                 return Boolean.TRUE.equals(isLastOfDay);
             }
-
-            public Integer resolvedMinutes(Integer slotMinutes){
-                return Math.min(durationMinutes, slotMinutes);
+            /** Actual duration in minutes for this activity given the slot duration. */
+            public int resolvedMinutes(int slotDurationMinutes) {
+                if (isDaySpecific()) {
+                    int p = periodsReplaced != null ? periodsReplaced : 1;
+                    return p * slotDurationMinutes;
+                }
+                return durationMinutes != null ? durationMinutes : slotDurationMinutes;
+            }
+            /** Number of subject slots this activity replaces (0 for global activities). */
+            public int slotsReplaced() {
+                if (!isDaySpecific()) return 0;
+                return periodsReplaced != null ? periodsReplaced : 1;
             }
         }
 
