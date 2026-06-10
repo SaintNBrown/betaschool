@@ -9,11 +9,14 @@ import com.betaschool.shared.QueryBus;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.LocalTime;
 import java.util.List;
 
 @RestController
@@ -121,20 +124,16 @@ public class TimetableController {
     // ── Request body records ──────────────────────────────────────────────
 
     public record GenerateTimetableRequest(
-            @jakarta.validation.constraints.NotEmpty List<String> operatingDays,
-            @jakarta.validation.constraints.NotNull Integer slotDurationMinutes,
-            @jakarta.validation.constraints.NotNull java.time.LocalTime schoolStartTime,
-            /** Optional. When provided, derives slotsPerDay from closing time. */
-            java.time.LocalTime schoolClosingTime,
+            @NotEmpty List<String> operatingDays,
+            @NotNull Integer slotDurationMinutes,
+            @NotNull LocalTime schoolStartTime,
+            LocalTime schoolClosingTime,
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.ActivitySpec> activities,
             List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.TeacherUnavailability> teacherUnavailableDays,
-            @jakarta.validation.constraints.NotEmpty
-            List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.SubjectFrequency> subjectFrequencies,
+            @NotEmpty List<com.betaschool.command.model.TimetableCommand.GenerateTimetableCommand.SubjectFrequency> subjectFrequencies,
             String notes) {}
 
     public record PublishTimetableRequest(
             String notes,
-            @jakarta.validation.constraints.NotEmpty
-            @jakarta.validation.Valid
-            List<TimetableSlotInput> slots) {}
+            @NotEmpty @Valid List<TimetableSlotInput> slots) {}
 }

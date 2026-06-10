@@ -440,7 +440,7 @@ public class GenerateTimetableHandler
                     .collect(Collectors.toList());
 
             // Build a set of subject-slot indices consumed by day-specific activities.
-            // Activity with afterSlotNumber=N and periodsReplaced=P consumes slot indices N..N+P-1
+            // Activity with afterSlotNumber=N and periodsReplaced=P consumes slot indices N...N+P-1
             // (0-indexed from the start of the day's subject slots).
             // But we need to think carefully: afterSlotNumber means "replaces starting at slot N".
             // Slots are 0-indexed in our canonical list.
