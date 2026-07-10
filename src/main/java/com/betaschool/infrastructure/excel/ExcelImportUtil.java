@@ -81,7 +81,14 @@ public final class ExcelImportUtil {
             }
             Map<String, Integer> colIndex = new LinkedHashMap<>();
             for (Cell cell : headerRow) {
-                colIndex.put(cellString(cell).toLowerCase().trim(), cell.getColumnIndex());
+                String header = cellString(cell).trim().toLowerCase();
+
+                int slash = header.indexOf('/');
+                if (slash > 0) {
+                    header = header.substring(0, slash).trim();
+                }
+
+                colIndex.put(header, cell.getColumnIndex());
             }
 
             // Validate required columns
